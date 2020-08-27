@@ -1839,6 +1839,41 @@ void checkChildrenDone(void) {
     }
 }
 
+/* Called from serverCron and loadingCron to update cached memory metrics. */
+void cronUpdateMemoryStats() {
+    /* Record the max memory used since the server was started. */
+    if (zmalloc_used_memory() > server.stat_peak_memory)
+        server.stat_peak_memory = zmalloc_used_memory();
+
+    run_with_period(100) {
+        /* Sample the RSS and other metrics here since this is a relatively slow call.
+         * We must sample the zmalloc_used at the same time we take the rss, otherwise
+         * the frag ratio calculate may be off (ratio of two samples at different times) */
+        server.cron_malloc_stats.process_rss = zmalloc_get_rss();
+        server.cron_malloc_stats.zmalloc_used = zmalloc_used_memory();
+        /* Sampling the allcator info can be slow too.
+         * The fragmentation ratio it'll show is potentically more accurate
+         * it excludes other RSS pages such as: shared libraries, LUA and other non-zmalloc
+         * allocations, and allocator reserved pages that can be pursed (all not actual frag) */
+        zmalloc_get_allocator_info(&server.cron_malloc_stats.allocator_allocated,
+                                   &server.cron_malloc_stats.allocator_active,
+                                   &server.cron_malloc_stats.allocator_resident);
+        /* in case the allocator isn't providing these stats, fake them so that
+         * fragmention info still shows some (inaccurate metrics) */
+        if (!server.cron_malloc_stats.allocator_resident) {
+            /* LUA memory isn't part of zmalloc_used, but it is part of the process RSS,
+             * so we must desuct it in order to be able to calculate correct
+             * "allocator fragmentation" ratio */
+            size_t lua_memory = lua_gc(server.lua,LUA_GCCOUNT,0)*1024LL;
+            server.cron_malloc_stats.allocator_resident = server.cron_malloc_stats.process_rss - lua_memory;
+        }
+        if (!server.cron_malloc_stats.allocator_active)
+            server.cron_malloc_stats.allocator_active = server.cron_malloc_stats.allocator_resident;
+        if (!server.cron_malloc_stats.allocator_allocated)
+            server.cron_malloc_stats.allocator_allocated = server.cron_malloc_stats.zmalloc_used;
+    }
+}
+
 /* This is our timer interrupt, called server.hz times per second.
  * Here is where we do a number of things that need to be done asynchronously.
  * For instance:
@@ -1907,37 +1942,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * LRU_CLOCK_RESOLUTION define. */
     server.lruclock = getLRUClock();
 
-    /* Record the max memory used since the server was started. */
-    if (zmalloc_used_memory() > server.stat_peak_memory)
-        server.stat_peak_memory = zmalloc_used_memory();
-
-    run_with_period(100) {
-        /* Sample the RSS and other metrics here since this is a relatively slow call.
-         * We must sample the zmalloc_used at the same time we take the rss, otherwise
-         * the frag ratio calculate may be off (ratio of two samples at different times) */
-        server.cron_malloc_stats.process_rss = zmalloc_get_rss();
-        server.cron_malloc_stats.zmalloc_used = zmalloc_used_memory();
-        /* Sampling the allcator info can be slow too.
-         * The fragmentation ratio it'll show is potentically more accurate
-         * it excludes other RSS pages such as: shared libraries, LUA and other non-zmalloc
-         * allocations, and allocator reserved pages that can be pursed (all not actual frag) */
-        zmalloc_get_allocator_info(&server.cron_malloc_stats.allocator_allocated,
-                                   &server.cron_malloc_stats.allocator_active,
-                                   &server.cron_malloc_stats.allocator_resident);
-        /* in case the allocator isn't providing these stats, fake them so that
-         * fragmention info still shows some (inaccurate metrics) */
-        if (!server.cron_malloc_stats.allocator_resident) {
-            /* LUA memory isn't part of zmalloc_used, but it is part of the process RSS,
-             * so we must desuct it in order to be able to calculate correct
-             * "allocator fragmentation" ratio */
-            size_t lua_memory = lua_gc(server.lua,LUA_GCCOUNT,0)*1024LL;
-            server.cron_malloc_stats.allocator_resident = server.cron_malloc_stats.process_rss - lua_memory;
-        }
-        if (!server.cron_malloc_stats.allocator_active)
-            server.cron_malloc_stats.allocator_active = server.cron_malloc_stats.allocator_resident;
-        if (!server.cron_malloc_stats.allocator_allocated)
-            server.cron_malloc_stats.allocator_allocated = server.cron_malloc_stats.zmalloc_used;
-    }
+    cronUpdateMemoryStats();
 
     /* We received a SIGTERM, shutting down here in a safe way, as it is
      * not ok doing so inside the signal handler. */
@@ -2101,6 +2106,24 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     server.cronloops++;
     return 1000/server.hz;
+}
+
+/* This function fill in the role of serverCron during RDB or AOF loading.
+ * It attempts to do its duties at a similar rate as the configured server.hz,
+ * and updates cronloops variable so that similarly to serverCron, the
+ * run_with_period can be used. */
+void loadingCron() {
+    long long now = server.ustime;
+    static long long next_event = 0;
+    if (now >= next_event) {
+        cronUpdateMemoryStats();
+        
+        /* Increment cronloop so that run_with_period works. */
+        server.cronloops++;
+
+        /* Decide when the next event should fire. */
+        next_event = now + 1000000 / server.hz;
+    }
 }
 
 extern int ProcessingEventsWhileBlocked;
@@ -3475,14 +3498,15 @@ void call(client *c, int flags) {
 /* Used when a command that is ready for execution needs to be rejected, due to
  * varios pre-execution checks. it returns the appropriate error to the client.
  * If there's a transaction is flags it as dirty, and if the command is EXEC,
- * it aborts the transaction. */
+ * it aborts the transaction.
+ * Note: 'reply' is expected to end with \r\n */
 void rejectCommand(client *c, robj *reply) {
     flagTransaction(c);
     if (c->cmd && c->cmd->proc == execCommand) {
         execCommandAbort(c, reply->ptr);
     } else {
         /* using addReplyError* rather than addReply so that the error can be logged. */
-        addReplyErrorSafe(c, reply->ptr, sdslen(reply->ptr));
+        addReplyErrorObject(c, reply);
     }
 }
 
@@ -3492,10 +3516,13 @@ void rejectCommandFormat(client *c, const char *fmt, ...) {
     va_start(ap,fmt);
     sds s = sdscatvprintf(sdsempty(),fmt,ap);
     va_end(ap);
+    /* Make sure there are no newlines in the string, otherwise invalid protocol
+     * is emitted (The args come from the user, they may contain any character). */
+    sdsmapchars(s, "\r\n", "  ",  2);
     if (c->cmd && c->cmd->proc == execCommand) {
         execCommandAbort(c, s);
     } else {
-        addReplyErrorSafe(c, s, sdslen(s));
+        addReplyErrorSds(c, s);
     }
     sdsfree(s);
 }
@@ -3625,14 +3652,19 @@ int processCommand(client *c) {
          * into a slave, that may be the active client, to be freed. */
         if (server.current_client == NULL) return C_ERR;
 
-        /* It was impossible to free enough memory, and the command the client
-         * is trying to execute is denied during OOM conditions or the client
-         * is in MULTI/EXEC context? Error. */
-        if (out_of_memory &&
-            (is_denyoom_command ||
-             (c->flags & CLIENT_MULTI &&
-              c->cmd->proc != discardCommand)))
-        {
+        int reject_cmd_on_oom = is_denyoom_command;
+        /* If client is in MULTI/EXEC context, queuing may consume an unlimited
+         * amount of memory, so we want to stop that.
+         * However, we never want to reject DISCARD, or even EXEC (unless it
+         * contains denied commands, in which case is_denyoom_command is already
+         * set. */
+        if (c->flags & CLIENT_MULTI &&
+            c->cmd->proc != execCommand &&
+            c->cmd->proc != discardCommand) {
+            reject_cmd_on_oom = 1;
+        }
+
+        if (out_of_memory && reject_cmd_on_oom) {
             rejectCommand(c, shared.oomerr);
             return C_OK;
         }
@@ -3660,7 +3692,7 @@ int processCommand(client *c) {
             rejectCommand(c, shared.bgsaveerr);
         else
             rejectCommandFormat(c,
-                "-MISCONF Errors writing to the AOF file: %s\r\n",
+                "-MISCONF Errors writing to the AOF file: %s",
                 strerror(server.aof_last_write_errno));
         return C_OK;
     }
@@ -4141,7 +4173,7 @@ sds genRedisInfoString(const char *section) {
             "lru_clock:%u\r\n"
             "executable:%s\r\n"
             "config_file:%s\r\n"
-            "io_threads_active:%d\r\n",
+            "io_threads_active:%i\r\n",
             REDIS_VERSION,
             redisGitSHA1(),
             strtol(redisGitDirty(),NULL,10) > 0,
