@@ -38,6 +38,7 @@
 #include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 void replicationDiscardCachedMaster(void);
 void replicationResurrectCachedMaster(connection *conn);
@@ -1012,8 +1013,15 @@ void removeRDBUsedToSyncReplicas(void) {
 
 void sendBulkToSlave(connection *conn) {
     client *slave = connGetPrivateData(conn);
-    char buf[PROTO_IOBUF_LEN];
-    ssize_t nwritten, buflen;
+    ssize_t nwritten;
+    static size_t mmap_length = 0;
+
+    /* Make length for 'mmap()' be page aligned. */
+    if (mmap_length == 0) {
+        size_t page_size = sysconf(_SC_PAGESIZE);
+        mmap_length = PROTO_IOBUF_LEN <= page_size ? page_size :
+            (PROTO_IOBUF_LEN + page_size - 1) & ~(page_size - 1);
+    }
 
     /* Before sending the RDB file, we send the preamble as configured by the
      * replication process. Currently the preamble is just the bulk count of
@@ -1039,22 +1047,29 @@ void sendBulkToSlave(connection *conn) {
     }
 
     /* If the preamble was already transferred, send the RDB bulk data. */
-    lseek(slave->repldbfd,slave->repldboff,SEEK_SET);
-    buflen = read(slave->repldbfd,buf,PROTO_IOBUF_LEN);
-    if (buflen <= 0) {
-        serverLog(LL_WARNING,"Read error sending DB to replica: %s",
-            (buflen == 0) ? "premature EOF" : strerror(errno));
+    off_t offset = slave->repldboff & ~(mmap_length - 1);
+    size_t bufoff = slave->repldboff - offset;
+    size_t buflen = slave->repldbsize - offset > (off_t)mmap_length ?
+                    mmap_length : (size_t)(slave->repldbsize - offset);
+    char *buf = mmap(NULL, mmap_length, PROT_READ, MAP_SHARED,
+                slave->repldbfd, offset);
+    if (buf == NULL || buf == (void *)-1) {
+        serverLog(LL_WARNING,"Mmap error sending DB to replica: %s",
+            strerror(errno));
         freeClient(slave);
         return;
     }
-    if ((nwritten = connWrite(conn,buf,buflen)) == -1) {
+    if ((nwritten = connWrite(conn, buf + bufoff, buflen - bufoff)) == -1) {
         if (connGetState(conn) != CONN_STATE_CONNECTED) {
             serverLog(LL_WARNING,"Write error sending DB to replica: %s",
                 connGetLastError(conn));
             freeClient(slave);
         }
+        munmap(buf, mmap_length);
         return;
     }
+    munmap(buf, mmap_length);
+
     slave->repldboff += nwritten;
     server.stat_net_output_bytes += nwritten;
     if (slave->repldboff == slave->repldbsize) {
