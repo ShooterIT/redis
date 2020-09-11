@@ -5,6 +5,9 @@ on:
     branches:
       # any PR to a release branch.
       - '[0-9].[0-9]'
+  push:
+    branches:
+      - redis-atomic-ci
   schedule:
     - cron: '0 0 * * *'
 
@@ -12,7 +15,7 @@ jobs:
 
   test-ubuntu-jemalloc:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -31,7 +34,7 @@ jobs:
 
   test-ubuntu-libc-malloc:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -50,7 +53,7 @@ jobs:
 
   test-ubuntu-32bit:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -73,7 +76,7 @@ jobs:
 
   test-ubuntu-tls:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -116,18 +119,41 @@ jobs:
 
   test-centos7-jemalloc:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     container: centos:7
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
     - name: make
       run: |
-        yum -y install centos-release-scl
-        yum -y install devtoolset-7
-        scl enable devtoolset-7 "make"
+        yum -y install gcc make
+        make
     - name: test
       run: |
+        yum -y install which
+        yum -y install tcl
+        ./runtest --accurate --verbose
+    - name: module api test
+      run: ./runtest-moduleapi --verbose
+    - name: sentinel tests
+      run: ./runtest-sentinel
+    - name: cluster tests
+      run: ./runtest-cluster
+
+  test-centos6-jemalloc:
+    runs-on: ubuntu-latest
+    if: github.repository == 'ShooterIT/redis'
+    container: centos:6
+    timeout-minutes: 14400
+    steps:
+    - uses: actions/checkout@v1
+    - name: make
+      run: |
+        yum -y install gcc make
+        make
+    - name: test
+      run: |
+        yum -y install which
         yum -y install tcl
         ./runtest --accurate --verbose
     - name: module api test
@@ -139,7 +165,7 @@ jobs:
 
   test-centos7-tls:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     container: centos:7
     timeout-minutes: 14400
     steps:
@@ -170,7 +196,7 @@ jobs:
 
   test-macos-latest:
     runs-on: macos-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
