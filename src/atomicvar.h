@@ -82,7 +82,7 @@
 #endif
 
 #if !defined(__ATOMIC_VAR_FORCE_SYNC_MACROS) && (__STDC_VERSION__ >= 201112L) && \
-    !defined(__STDC_NO_ATOMIC__)
+    !defined(__STDC_NO_ATOMICS__)
 /* Use '_Atomic' keyword if the compiler supports. */
 #undef  redisAtomic
 #define redisAtomic _Atomic
