@@ -130,7 +130,7 @@ jobs:
         make
     - name: test
       run: |
-        yum -y install util-linux-ng tcl
+        yum -y install which tcl
         ./runtest --accurate --verbose
     - name: module api test
       run: ./runtest-moduleapi --verbose
@@ -152,7 +152,7 @@ jobs:
         make
     - name: test
       run: |
-        yum -y install util-linux-ng tcl
+        yum -y install which tcl util-linux-ng
         ./runtest --accurate --verbose
     - name: module api test
       run: ./runtest-moduleapi --verbose
