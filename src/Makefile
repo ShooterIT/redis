@@ -20,7 +20,7 @@ DEPENDENCY_TARGETS=hiredis linenoise lua hdr_histogram
 NODEPS:=clean distclean
 
 # Default settings
-STD=-std=c99 -pedantic -DREDIS_STATIC=''
+STD=-pedantic -DREDIS_STATIC=''
 ifneq (,$(findstring clang,$(CC)))
 ifneq (,$(findstring FreeBSD,$(uname_S)))
   STD+=-Wno-c11-extensions
@@ -28,6 +28,16 @@ endif
 endif
 WARN=-Wall -W -Wno-missing-field-initializers
 OPT=$(OPTIMIZATION)
+
+# Detect if the compiler supports C11 _Atomic
+C11_ATOMIC := $(shell sh -c 'echo "\#include <stdatomic.h> _Atomic a;" > foo.c && \
+	$(CC) -std=c11 -c foo.c -o bar.o &> /dev/null; \
+	if [ -f bar.o ]; then echo "yes"; rm bar.o; fi; rm foo.c')
+ifeq ($(C11_ATOMIC),yes)
+	STD+=-std=c11
+else
+	STD+=-std=c99
+endif
 
 PREFIX?=/usr/local
 INSTALL_BIN=$(PREFIX)/bin
