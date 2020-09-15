@@ -52,7 +52,7 @@ jobs:
     container: centos:7
     steps:
     - uses: actions/checkout@v2
-    name: make
+    - name: make
       run: |
         yum -y install gcc make
         make
@@ -62,7 +62,7 @@ jobs:
     container: centos:6
     steps:
     - uses: actions/checkout@v1
-    name: make
+    - name: make
       run: |
         yum -y install gcc make
         make
