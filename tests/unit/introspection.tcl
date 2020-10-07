@@ -92,6 +92,7 @@ start_server {tags {"introspection"}} {
             databases
             port
             tls-port
+            rdb-bulk-send-delay
             io-threads
             logfile
             unixsocketperm
