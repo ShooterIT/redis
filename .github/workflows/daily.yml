@@ -5,6 +5,9 @@ on:
     branches:
       # any PR to a release branch.
       - '[0-9].[0-9]'
+  push:
+    branches:
+      - rdb-thread-ci
   schedule:
     - cron: '0 0 * * *'
 
@@ -73,7 +76,7 @@ jobs:
 
   test-ubuntu-tls:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
@@ -101,7 +104,7 @@ jobs:
 
   test-valgrind:
     runs-on: ubuntu-latest
-    if: github.repository == 'redis/redis'
+    if: github.repository == 'ShooterIT/redis'
     timeout-minutes: 14400
     steps:
     - uses: actions/checkout@v2
