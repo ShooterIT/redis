@@ -2269,6 +2269,10 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     /* Handle writes with pending output buffers. */
     handleClientsWithPendingWritesUsingThreads();
 
+    /* If we send RDB file to slaves by threads, check sending RDB is finished
+     * or not, and update slaves' replication state if need. */
+    updateSlavesReplicationStateIfNeed();
+
     /* Close clients that need to be closed asynchronous */
     freeClientsInAsyncFreeQueue();
 
@@ -2479,6 +2483,7 @@ void initServerConfig(void) {
     server.repl_syncio_timeout = CONFIG_REPL_SYNCIO_TIMEOUT;
     server.repl_down_since = 0; /* Never connected, repl is down since EVER. */
     server.master_repl_offset = 0;
+    server.send_rdb_by_thread = 0;
 
     /* Replication partial resync backlog */
     server.repl_backlog = NULL;

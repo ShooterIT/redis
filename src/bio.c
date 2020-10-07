@@ -92,11 +92,33 @@ void lazyfreeFreeSlotsMapFromBioThread(rax *rt);
  * main thread. */
 #define REDIS_THREAD_STACK_SIZE (1024*1024*4)
 
+/* Set the stack size of pthread_attr. */
+void setPthreadAttrStacksize(pthread_attr_t *attr) {
+    size_t stacksize;
+
+    /* Set the stack size as by default it may be small in some system */
+    pthread_attr_init(attr);
+    pthread_attr_getstacksize(attr,&stacksize);
+    if (!stacksize) stacksize = 1; /* The world is full of Solaris Fixes */
+    while (stacksize < REDIS_THREAD_STACK_SIZE) stacksize *= 2;
+    pthread_attr_setstacksize(attr,stacksize);
+}
+
+/* Block SIGALRM of calling thread so that the thread will not receive
+ * the watchdog signal since read and write system call may return a negative
+ * value with EINTR errno. */
+int blockThreadSigalrm(void) {
+    sigset_t sigset;
+
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGALRM);
+    return pthread_sigmask(SIG_BLOCK, &sigset, NULL);
+}
+
 /* Initialize the background system, spawning the thread. */
 void bioInit(void) {
     pthread_attr_t attr;
     pthread_t thread;
-    size_t stacksize;
     int j;
 
     /* Initialization of state vars and objects */
@@ -108,12 +130,7 @@ void bioInit(void) {
         bio_pending[j] = 0;
     }
 
-    /* Set the stack size as by default it may be small in some system */
-    pthread_attr_init(&attr);
-    pthread_attr_getstacksize(&attr,&stacksize);
-    if (!stacksize) stacksize = 1; /* The world is full of Solaris Fixes */
-    while (stacksize < REDIS_THREAD_STACK_SIZE) stacksize *= 2;
-    pthread_attr_setstacksize(&attr, stacksize);
+    setPthreadAttrStacksize(&attr);
 
     /* Ready to spawn our threads. We use the single argument the thread
      * function accepts in order to pass the job ID the thread is
@@ -145,7 +162,6 @@ void bioCreateBackgroundJob(int type, void *arg1, void *arg2, void *arg3) {
 void *bioProcessBackgroundJobs(void *arg) {
     struct bio_job *job;
     unsigned long type = (unsigned long) arg;
-    sigset_t sigset;
 
     /* Check that the type is within the right interval. */
     if (type >= BIO_NUM_OPS) {
@@ -173,9 +189,7 @@ void *bioProcessBackgroundJobs(void *arg) {
     pthread_mutex_lock(&bio_mutex[type]);
     /* Block SIGALRM so we are sure that only the main thread will
      * receive the watchdog signal. */
-    sigemptyset(&sigset);
-    sigaddset(&sigset, SIGALRM);
-    if (pthread_sigmask(SIG_BLOCK, &sigset, NULL))
+    if (blockThreadSigalrm())
         serverLog(LL_WARNING,
             "Warning: can't mask SIGALRM in bio.c thread: %s", strerror(errno));
 
