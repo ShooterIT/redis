@@ -61,6 +61,7 @@
  * the number of elements and the buckets > dict_force_resize_ratio. */
 static int dict_can_resize = 1;
 static unsigned int dict_force_resize_ratio = 5;
+static dictExpandCheckerFunction dictExpandChecker = NULL;
 
 /* -------------------------- private prototypes ---------------------------- */
 
@@ -951,6 +952,28 @@ unsigned long dictScan(dict *d,
 
 /* ------------------------- private functions ------------------------------ */
 
+/* Return the size of new hash table if we can expand dict, return 0 if not.
+ * We call this when add entries into dict and generally need to expand dict. */
+static unsigned long dictCanExpandSize(dict *d) {
+    unsigned long new_size = d->ht[0].used * 2;
+    if (dictExpandChecker == NULL) return new_size;
+
+    /* We set new hash table size to double of ht[0].used to avoid reshash
+     * soon again, actually because hash table capability is a power of two,
+     * new hash table size is 4 times of ht[0].size if ht[0].used is more than
+     * ht[0].size. But in this case, we can try again without double it to
+     * reduce hash conflict when there is no much remainding available memory. */
+    if (dictExpandChecker(_dictNextPower(new_size) * sizeof(dictEntry*))) {
+        return new_size;
+    } else if (d->ht[0].used > d->ht[0].size) {
+        new_size = d->ht[0].used;
+        if (dictExpandChecker(_dictNextPower(new_size) * sizeof(dictEntry*))) {
+            return new_size;
+        }
+    }
+    return 0;
+}
+
 /* Expand the hash table if needed */
 static int _dictExpandIfNeeded(dict *d)
 {
@@ -964,11 +987,13 @@ static int _dictExpandIfNeeded(dict *d)
      * table (global setting) or we should avoid it but the ratio between
      * elements/buckets is over the "safe" threshold, we resize doubling
      * the number of buckets. */
+    unsigned long new_size = 0;
     if (d->ht[0].used >= d->ht[0].size &&
         (dict_can_resize ||
-         d->ht[0].used/d->ht[0].size > dict_force_resize_ratio))
+         d->ht[0].used/d->ht[0].size > dict_force_resize_ratio) &&
+        (new_size = dictCanExpandSize(d)) > 0)
     {
-        return dictExpand(d, d->ht[0].used*2);
+        return dictExpand(d, new_size);
     }
     return DICT_OK;
 }
@@ -1031,6 +1056,10 @@ void dictEnableResize(void) {
 
 void dictDisableResize(void) {
     dict_can_resize = 0;
+}
+
+void dictSetExpandChecker(dictExpandCheckerFunction checker) {
+    dictExpandChecker = checker;
 }
 
 uint64_t dictGetHash(dict *d, const void *key) {

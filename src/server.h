@@ -2029,6 +2029,7 @@ int zslLexValueLteMax(sds value, zlexrangespec *spec);
 /* Core functions */
 int getMaxmemoryState(size_t *total, size_t *logical, size_t *tofree, float *level);
 size_t freeMemoryGetNotCountedMemory();
+int canAllocateMoreMemory(size_t more_mem);
 int processCommand(client *c);
 void setupSignalHandlers(void);
 void removeSignalHandlers(void);
