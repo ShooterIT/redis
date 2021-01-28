@@ -12,12 +12,12 @@ jobs:
       # Fail build if there are warnings
       # build with TLS just for compilation coverage
       run: make REDIS_CFLAGS='-Werror' BUILD_TLS=yes
-    - name: test
-      run: |
-        sudo apt-get install tcl8.5
-        ./runtest --verbose
-    - name: module api test
-      run: ./runtest-moduleapi --verbose
+    # - name: test
+    #   run: |
+    #     sudo apt-get install tcl8.5
+    #     ./runtest --verbose
+    # - name: module api test
+    #   run: ./runtest-moduleapi --verbose
 
   build-ubuntu-old:
     runs-on: ubuntu-16.04
@@ -69,3 +69,13 @@ jobs:
         usesh: true
         prepare: pkg install -y gmake
         run: gmake
+
+build-arm-ubuntu:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: make
+      with:
+        arch: armv7
+        distro: ubuntu-latest
+        run: make REDIS_CFLAGS='-Werror'
