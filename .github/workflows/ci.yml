@@ -70,7 +70,7 @@ jobs:
         prepare: pkg install -y gmake
         run: gmake
 
-build-arm-ubuntu:
+  build-arm-ubuntu:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
