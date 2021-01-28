@@ -71,9 +71,13 @@ jobs:
         run: gmake
 
   build-arm-ubuntu:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu20.04
     steps:
     - uses: actions/checkout@v2
-    - uses: azure/arm-deploy@v1
     - name: make
-      run: make REDIS_CFLAGS='-Werror'
+      uses: uraimo/run-on-arch-action@v2.0.5
+      with:
+        arch: armv7
+        distro: ubuntu20.04
+        githubToken: ${{ github.token }}
+        run: make REDIS_CFLAGS='-Werror'
