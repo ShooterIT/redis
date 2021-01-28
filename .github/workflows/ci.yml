@@ -79,5 +79,4 @@ jobs:
       with:
         arch: armv7
         distro: ubuntu20.04
-        githubToken: ${{ github.token }}
         run: make REDIS_CFLAGS='-Werror'
