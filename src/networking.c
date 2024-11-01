@@ -21,6 +21,16 @@
 #include <sys/uio.h>
 #include <math.h>
 #include <ctype.h>
+#include <sys/eventfd.h>
+
+#define IO_THREADS_MAX_NUM 16
+static iothread io_threads[IO_THREADS_MAX_NUM];
+static list *send_io_thread_write[IO_THREADS_MAX_NUM];
+
+static list *main_thread_inbox[IO_THREADS_MAX_NUM];
+static list *main_thread_inbox_temp[IO_THREADS_MAX_NUM];
+static pthread_mutex_t main_thread_inbox_mutex[IO_THREADS_MAX_NUM];
+static int main_thread_inbox_efd[IO_THREADS_MAX_NUM]; /* io-threads write wake up main */
 
 static void setProtocolError(const char *errstr, client *c);
 static void pauseClientsByClient(mstime_t end, int isPauseClientAll);
@@ -124,7 +134,7 @@ client *createClient(connection *conn) {
         connEnableTcpNoDelay(conn);
         if (server.tcpkeepalive)
             connKeepAlive(conn,server.tcpkeepalive);
-        connSetReadHandler(conn, readQueryFromClient);
+        // connSetReadHandler(conn, readQueryFromClient);
         connSetPrivateData(conn, c);
     }
     c->buf = zmalloc_usable(PROTO_REPLY_CHUNK_BYTES, &c->buf_usable_size);
@@ -155,6 +165,7 @@ client *createClient(connection *conn) {
     c->argv = NULL;
     c->argv_len = 0;
     c->argv_len_sum = 0;
+    c->argv_list = listCreate();
     c->original_argc = 0;
     c->original_argv = NULL;
     c->cmd = c->lastcmd = c->realcmd = NULL;
@@ -182,6 +193,7 @@ client *createClient(connection *conn) {
     c->slave_req = SLAVE_REQ_NONE;
     c->reply = listCreate();
     c->deferred_reply_errors = NULL;
+    c->in_exec = 0;
     c->reply_bytes = 0;
     c->obuf_soft_limit_reached_time = 0;
     listSetFreeMethod(c->reply,freeClientReplyValue);
@@ -253,7 +265,9 @@ void putClientInPendingWriteQueue(client *c) {
          * a system call. We'll only really install the write handler if
          * we'll not be able to write the whole reply at once. */
         c->flags |= CLIENT_PENDING_WRITE;
-        listLinkNodeHead(server.clients_pending_write, &c->clients_pending_write_node);
+        // listLinkNodeHead(server.clients_pending_write, &c->clients_pending_write_node);
+        //serverLog(LL_NOTICE, "ADD WRITE LIST");
+        listAddNodeTail(send_io_thread_write[c->thread_id], c);
     }
 }
 
@@ -306,7 +320,8 @@ int prepareClientToWrite(client *c) {
      * not put the client in pending write queue. Instead, it will be
      * done by handleClientsWithPendingReadsUsingThreads() upon return.
      */
-    if (!clientHasPendingReplies(c) && io_threads_op == IO_THREADS_OP_IDLE)
+    //serverLog(LL_NOTICE, "ADD WRITE LIST");
+    if (!clientHasPendingReplies(c) /*&& io_threads_op == IO_THREADS_OP_IDLE*/)
         putClientInPendingWriteQueue(c);
 
     /* Authorize the caller to queue in the output buffer of this client. */
@@ -1354,7 +1369,21 @@ void clientAcceptHandler(connection *conn) {
                           c);
 }
 
+void handleBindClient(iothread *iot, void *data) {
+    client *c = data;
+    connSetEventLoop(c->conn, iot->el);
+    connSetReadHandler(c->conn, readQueryFromClient);
+}
+
+void handleWriteClient(iothread *iot, void *data) {
+    printf("handleWriteClient\n");
+    client *c = data;
+    connSetWriteHandler(c->conn, sendReplyToClient);
+    connSetReadHandler(c->conn, readQueryFromClient);
+}
+
 void acceptCommonHandler(connection *conn, int flags, char *ip) {
+    // printf("acceptCommonHandler\n");
     client *c;
     UNUSED(ip);
 
@@ -1428,6 +1457,22 @@ void acceptCommonHandler(connection *conn, int flags, char *ip) {
         freeClient(connGetPrivateData(conn));
         return;
     }
+
+    /* Remove from main's event loop. */
+    connSetReadHandler(c->conn, NULL);
+    connSetWriteHandler(c->conn, NULL);
+    connSetEventLoop(c->conn, NULL);
+    c->thread_id = c->id % (server.io_threads_num - 1);
+    iothread *iot = &io_threads[c->thread_id];
+    // printf("add client to iothread %d, %p\n", c->id % (server.io_threads_num - 1), iot);
+    pthread_mutex_lock(&iot->inbox_mutex);
+    iojob *job = zmalloc(sizeof(*job));
+    job->handler = handleBindClient;
+    job->data = c;
+    listAddNodeTail(iot->inbox, job);
+    uint64_t u = 1; // 通知事件数
+    if (write(iot->inbox_efd, &u, sizeof(uint64_t))) {}
+    pthread_mutex_unlock(&iot->inbox_mutex);
 }
 
 void freeClientOriginalArgv(client *c) {
@@ -2107,8 +2152,8 @@ int writeToClient(client *c, int handler_installed) {
     /* Update client's memory usage after writing.
      * Since this isn't thread safe we do this conditionally. In case of threaded writes this is done in
      * handleClientsWithPendingWritesUsingThreads(). */
-    if (io_threads_op == IO_THREADS_OP_IDLE)
-        updateClientMemUsageAndBucket(c);
+    // if (io_threads_op == IO_THREADS_OP_IDLE)
+    //     updateClientMemUsageAndBucket(c);
     return C_OK;
 }
 
@@ -2116,40 +2161,6 @@ int writeToClient(client *c, int handler_installed) {
 void sendReplyToClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     writeToClient(c,1);
-}
-
-/* This function is called just before entering the event loop, in the hope
- * we can just write the replies to the client output buffer without any
- * need to use a syscall in order to install the writable event handler,
- * get it called, and so forth. */
-int handleClientsWithPendingWrites(void) {
-    listIter li;
-    listNode *ln;
-    int processed = listLength(server.clients_pending_write);
-
-    listRewind(server.clients_pending_write,&li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        c->flags &= ~CLIENT_PENDING_WRITE;
-        listUnlinkNode(server.clients_pending_write,ln);
-
-        /* If a client is protected, don't do anything,
-         * that may trigger write error or recreate handler. */
-        if (c->flags & CLIENT_PROTECTED) continue;
-
-        /* Don't write to clients that are going to be closed anyway. */
-        if (c->flags & CLIENT_CLOSE_ASAP) continue;
-
-        /* Try to write buffers to the client socket. */
-        if (writeToClient(c,0) == C_ERR) continue;
-
-        /* If after the synchronous writes above we still have data to
-         * output to the client, we need to install the writable handler. */
-        if (clientHasPendingReplies(c)) {
-            installClientWriteHandler(c);
-        }
-    }
-    return processed;
 }
 
 /* resetClient prepare the client to process the next command */
@@ -2211,8 +2222,8 @@ void resetClient(client *c) {
 void protectClient(client *c) {
     c->flags |= CLIENT_PROTECTED;
     if (c->conn) {
-        connSetReadHandler(c->conn,NULL);
-        connSetWriteHandler(c->conn,NULL);
+        // connSetReadHandler(c->conn,NULL);
+        // connSetWriteHandler(c->conn,NULL);
     }
 }
 
@@ -2221,7 +2232,6 @@ void unprotectClient(client *c) {
     if (c->flags & CLIENT_PROTECTED) {
         c->flags &= ~CLIENT_PROTECTED;
         if (c->conn) {
-            connSetReadHandler(c->conn,readQueryFromClient);
             if (clientHasPendingReplies(c)) putClientInPendingWriteQueue(c);
         }
     }
@@ -2614,6 +2624,54 @@ int processPendingCommandAndInputBuffer(client *c) {
     return C_OK;
 }
 
+
+static void IOThreadMessageToMain(client *c) {
+    iothread *iot = &io_threads[c->id % (server.io_threads_num - 1)];
+    //c->in_exec = 1;
+    //listAddNodeTail(iot->in_exec_clients, c);
+    listAddNodeTail(iot->to_process,c);
+    connSetReadHandler(c->conn, NULL);
+    connSetWriteHandler(c->conn, NULL);
+}
+
+void handleMessagesFromIOThreads() {
+    // reading already is done
+    for (int i = 0; i < server.io_threads_num-1; i++) {
+        if (listLength(send_io_thread_write[i]) > 0) {
+            iothread *iot = &io_threads[i];
+            pthread_mutex_lock(&(iot->write_clients_mutex));
+            listFuse(iot->to_write_clients, send_io_thread_write[i], 1);
+            pthread_mutex_unlock(&(iot->write_clients_mutex));
+            uint64_t u = 1;
+            if (write(iot->pending_write_efd, &u, sizeof(uint64_t)) != sizeof(uint64_t)) {}
+        }
+    }
+}
+
+void handleExecute(struct aeEventLoop *el, int fd, void *ptr, int mask) {
+    UNUSED(el);
+    UNUSED(ptr);
+    UNUSED(mask);
+    uint64_t x;
+
+    if (read(fd, &x, sizeof(uint64_t)) == sizeof(uint64_t)) {}
+
+    iothread *iot = ptr;
+    
+    pthread_mutex_lock(&main_thread_inbox_mutex[iot->id]);
+    listFuse(main_thread_inbox_temp[iot->id], main_thread_inbox[iot->id], 1);
+    pthread_mutex_unlock(&main_thread_inbox_mutex[iot->id]);
+
+    listIter li;
+    listNode *ln;
+    listRewind(main_thread_inbox_temp[iot->id], &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);;
+        serverAssert(processCommandAndResetClient(c) == C_OK);
+    }
+    listEmpty(main_thread_inbox_temp[iot->id]);
+}
+
 /* This function is called every time, in the client structure 'c', there is
  * more query buffer to process, because we read more data from the socket
  * or because a client was blocked and later reactivated, so there could be
@@ -2663,12 +2721,15 @@ int processInputBuffer(client *c) {
         if (c->argc == 0) {
             resetClient(c);
         } else {
-            /* If we are in the context of an I/O thread, we can't really
-             * execute the command here. All we can do is to flag the client
-             * as one that needs to process the command. */
-            if (io_threads_op != IO_THREADS_OP_IDLE) {
-                serverAssert(io_threads_op == IO_THREADS_OP_READ);
-                c->flags |= CLIENT_PENDING_COMMAND;
+            /* If we are in the context of an I/O thread, we inform the main thread
+            * that this client has a command ready to execute. We can't parse
+            * another command until the main thread is done executing it. */
+            if (server.io_threads_num) {
+                IOThreadMessageToMain(c);
+                /* For clients not handled by an I/O thread, resize query buffer is
+                * done in clientsCron, but for I/O thread we don't have that (yet)
+                * so we do it after parsing a full command. */
+                // clientsCronResizeQueryBuffer(c);
                 break;
             }
 
@@ -2679,6 +2740,7 @@ int processInputBuffer(client *c) {
                  * ASAP in that case. */
                 return C_ERR;
             }
+            break;
         }
     }
 
@@ -2715,6 +2777,10 @@ int processInputBuffer(client *c) {
     return C_OK;
 }
 
+iothread *getIOThreadByClient(client *c) {
+    return &io_threads[c->id % (server.io_threads_num - 1)];
+}
+
 void readQueryFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     int nread, big_arg = 0;
@@ -2722,7 +2788,8 @@ void readQueryFromClient(connection *conn) {
 
     /* Check if we want to read from the client later when exiting from
      * the event loop. This is the case if threaded I/O is enabled. */
-    if (postponeClientRead(c)) return;
+    // if (postponeClientRead(c)) return;
+    //serverLog(LL_DEBUG, "read query");
 
     /* Update total number of reads on server */
     atomicIncr(server.stat_total_reads_processed, 1);
@@ -4312,15 +4379,11 @@ void processEventsWhileBlocked(void) {
  * Threaded I/O
  * ========================================================================== */
 
-#define IO_THREADS_MAX_NUM 128
 
 typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) threads_pending {
     redisAtomic unsigned long value;
 } threads_pending;
 
-pthread_t io_threads[IO_THREADS_MAX_NUM];
-pthread_mutex_t io_threads_mutex[IO_THREADS_MAX_NUM];
-threads_pending io_threads_pending[IO_THREADS_MAX_NUM];
 int io_threads_op;      /* IO_THREADS_OP_IDLE, IO_THREADS_OP_READ or IO_THREADS_OP_WRITE. */ // TODO: should access to this be atomic??!
 
 /* This is the list of clients each thread will serve when threaded I/O is
@@ -4328,59 +4391,115 @@ int io_threads_op;      /* IO_THREADS_OP_IDLE, IO_THREADS_OP_READ or IO_THREADS_
  * itself. */
 list *io_threads_list[IO_THREADS_MAX_NUM];
 
-static inline unsigned long getIOPendingCount(int i) {
-    unsigned long count = 0;
-    atomicGetWithSync(io_threads_pending[i].value, count);
-    return count;
+void IOThreadHandleMessages(iothread *iot) {
+    listIter li;
+    listNode *ln;
+    listRewind(iot->in_exec_clients,&li);
+    while((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        if (!c->in_exec) {
+            connSetWriteHandler(c->conn, sendReplyToClient);
+            connSetReadHandler(c->conn, readQueryFromClient); 
+            listDelNode(iot->in_exec_clients,ln);
+            continue;
+        }
+    }
 }
 
-static inline void setIOPendingCount(int i, unsigned long count) {
-    atomicSetWithSync(io_threads_pending[i].value, count);
+void ioThreadBeforeSleep(struct aeEventLoop *el) {
+    iothread *iot = el->privdata;
+
+    if (listLength(iot->to_process) > 0) {
+        pthread_mutex_lock(&main_thread_inbox_mutex[iot->id]);
+        listFuse(main_thread_inbox[iot->id], iot->to_process, 1);
+        pthread_mutex_unlock(&main_thread_inbox_mutex[iot->id]);
+        uint64_t u = 1;
+        if (write(main_thread_inbox_efd[iot->id], &u, sizeof(uint64_t))) {}
+    }
+
+    list *tmp = listCreate();
+    pthread_mutex_lock(&iot->write_clients_mutex);
+    listFuse(tmp, iot->to_write_clients,1);
+    pthread_mutex_unlock(&iot->write_clients_mutex);
+    if (listLength(tmp) > 0) {
+        //serverLog(LL_NOTICE, "write client list length %d", listLength(tmp));
+        listIter li;
+        listNode *ln;
+        listRewind(tmp, &li);
+        while((ln = listNext(&li))) {
+            client *c = listNodeValue(ln);
+            //serverAssert(!c->in_exec);
+            writeToClient(c, 0);
+            c->flags &= ~CLIENT_PENDING_WRITE;
+            if (clientHasPendingReplies(c)) {
+                connSetWriteHandler(c->conn, sendReplyToClient);
+                //serverLog(LL_NOTICE, "writable");
+            }
+            connSetReadHandler(c->conn, readQueryFromClient);
+        }
+    }
+    listRelease(tmp);
 }
 
-void *IOThreadMain(void *myid) {
+void ioThreadAfterSleep(struct aeEventLoop *el) {
+    UNUSED(el);
+    iothread *t = el->privdata;
+    //atomicSet(t->sleeping, 0);
+}
+
+void *IOThreadMain(void *ptr) {
     /* The ID is the thread number (from 0 to server.io_threads_num-1), and is
      * used by the thread to just manipulate a single sub-array of clients. */
-    long id = (unsigned long)myid;
+    iothread *iot = ptr;
     char thdname[16];
 
-    snprintf(thdname, sizeof(thdname), "io_thd_%ld", id);
+    snprintf(thdname, sizeof(thdname), "io_thd_%ld", iot->id);
     redis_set_thread_title(thdname);
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
+    iot->el->privdata = iot;
+    aeSetBeforeSleepProc(iot->el, ioThreadBeforeSleep);
+    aeSetAfterSleepProc(iot->el, ioThreadAfterSleep);
+    aeMain(iot->el);
+    return NULL;
+}
 
-    while(1) {
-        /* Wait for start */
-        for (int j = 0; j < 1000000; j++) {
-            if (getIOPendingCount(id) != 0) break;
-        }
+static void handlePendWrite(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
+    UNUSED(ae);
+    UNUSED(fd);
+    UNUSED(ptr);
+    UNUSED(mask);
 
-        /* Give the main thread a chance to stop this thread. */
-        if (getIOPendingCount(id) == 0) {
-            pthread_mutex_lock(&io_threads_mutex[id]);
-            pthread_mutex_unlock(&io_threads_mutex[id]);
-            continue;
-        }
+    uint64_t x;
+    if (read(fd, &x, sizeof(uint64_t)) < 0) {
+        serverLog(LL_WARNING, "Failed reading from io threading cmd pipe: %s", strerror(errno));
+        exit(1);
+    }
+}
 
-        serverAssert(getIOPendingCount(id) != 0);
+static void handleJobs(struct aeEventLoop *ae, int fd, void *ptr, int mask) {
+    UNUSED(ae);
+    UNUSED(fd);
+    UNUSED(ptr);
+    UNUSED(mask);
+    iothread *iot = ptr;
+    listNode *ln;
+    uint64_t x;
 
-        /* Process: note that the main thread will never touch our list
-         * before we drop the pending count to 0. */
-        listIter li;
-        listNode *ln;
-        listRewind(io_threads_list[id],&li);
-        while((ln = listNext(&li))) {
-            client *c = listNodeValue(ln);
-            if (io_threads_op == IO_THREADS_OP_WRITE) {
-                writeToClient(c,0);
-            } else if (io_threads_op == IO_THREADS_OP_READ) {
-                readQueryFromClient(c->conn);
-            } else {
-                serverPanic("io_threads_op value is unknown");
-            }
-        }
-        listEmpty(io_threads_list[id]);
-        setIOPendingCount(id, 0);
+    if (read(fd, &x, sizeof(uint64_t)) < 0) {
+        serverLog(LL_WARNING, "Failed reading from io threading cmd pipe: %s", strerror(errno));
+        exit(1);
+    }
+
+    pthread_mutex_lock(&iot->inbox_mutex);
+    list *l = iot->inbox;
+    iot->inbox = listCreate();
+    pthread_mutex_unlock(&iot->inbox_mutex);
+    while ((ln = listFirst(l))) {
+        iojob *job = ln->value;
+        job->handler(iot, job->data);
+        zfree(job);
+        listDelNode(l, ln);
     }
 }
 
@@ -4402,179 +4521,69 @@ void initThreadedIO(void) {
     }
 
     /* Spawn and initialize the I/O threads. */
-    for (int i = 0; i < server.io_threads_num; i++) {
-        /* Things we do for all the threads including the main thread. */
-        io_threads_list[i] = listCreate();
-        if (i == 0) continue; /* Thread 0 is the main thread. */
+    // io_threads = zmalloc(sizeof(*io_threads) * (server.io_threads_num - 1));
+    for (int i = 0; i < server.io_threads_num - 1; i++) {
+        pthread_mutexattr_t attr;
+        iothread *iot = &io_threads[i];
+        iot->id = i;
+        iot->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+        iot->inbox = listCreate();
+        iot->in_exec_clients = listCreate();
+        iot->to_process = listCreate();
+        iot->to_write_clients = listCreate();
+        atomicSet(iot->sleeping, 0);
+
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ADAPTIVE_NP);
+
+        pthread_mutex_init(&iot->inbox_mutex, &attr);
+        pthread_mutex_init(&iot->write_clients_mutex, &attr);
+        send_io_thread_write[i] = listCreate();
+        
+        // main thread
+        main_thread_inbox[i] = listCreate();
+        main_thread_inbox_temp[i] = listCreate();
+        pthread_mutex_init(&main_thread_inbox_mutex[i], &attr);
+        main_thread_inbox_efd[i] = eventfd(0, EFD_NONBLOCK);
+        if (aeCreateFileEvent(server.el, main_thread_inbox_efd[i], AE_READABLE, handleExecute, iot) != AE_OK) {
+            serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+            exit(1);
+        }
+
+        iot->inbox_efd = eventfd(0, EFD_NONBLOCK);
+        if (aeCreateFileEvent(iot->el, iot->inbox_efd, AE_READABLE, handleJobs, iot) != AE_OK) {
+            serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+            exit(1);
+        }
+        
+        iot->pending_write_efd = eventfd(0, EFD_NONBLOCK);
+        if (aeCreateFileEvent(iot->el, iot->pending_write_efd, AE_READABLE, handlePendWrite, iot) != AE_OK) {
+            serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+            exit(1);
+        }
 
         /* Things we do only for the additional threads. */
-        pthread_t tid;
-        pthread_mutex_init(&io_threads_mutex[i],NULL);
-        setIOPendingCount(i, 0);
-        pthread_mutex_lock(&io_threads_mutex[i]); /* Thread will be stopped. */
-        if (pthread_create(&tid,NULL,IOThreadMain,(void*)(long)i) != 0) {
+        if (pthread_create(&iot->tid,NULL,IOThreadMain,(void*)iot) != 0) {
             serverLog(LL_WARNING,"Fatal: Can't initialize IO thread.");
             exit(1);
         }
-        io_threads[i] = tid;
     }
 }
 
 void killIOThreads(void) {
     int err, j;
     for (j = 0; j < server.io_threads_num; j++) {
-        if (io_threads[j] == pthread_self()) continue;
-        if (io_threads[j] && pthread_cancel(io_threads[j]) == 0) {
-            if ((err = pthread_join(io_threads[j],NULL)) != 0) {
+        if (io_threads[j].tid == pthread_self()) continue;
+        if (io_threads[j].tid && pthread_cancel(io_threads[j].tid) == 0) {
+            if ((err = pthread_join(io_threads[j].tid,NULL)) != 0) {
                 serverLog(LL_WARNING,
                     "IO thread(tid:%lu) can not be joined: %s",
-                        (unsigned long)io_threads[j], strerror(err));
+                        (unsigned long)io_threads[j].tid, strerror(err));
             } else {
                 serverLog(LL_WARNING,
-                    "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j]);
+                    "IO thread(tid:%lu) terminated",(unsigned long)io_threads[j].tid);
             }
         }
     }
-}
-
-void startThreadedIO(void) {
-    serverAssert(server.io_threads_active == 0);
-    for (int j = 1; j < server.io_threads_num; j++)
-        pthread_mutex_unlock(&io_threads_mutex[j]);
-    server.io_threads_active = 1;
-}
-
-void stopThreadedIO(void) {
-    /* We may have still clients with pending reads when this function
-     * is called: handle them before stopping the threads. */
-    handleClientsWithPendingReadsUsingThreads();
-    serverAssert(server.io_threads_active == 1);
-    for (int j = 1; j < server.io_threads_num; j++)
-        pthread_mutex_lock(&io_threads_mutex[j]);
-    server.io_threads_active = 0;
-}
-
-/* This function checks if there are not enough pending clients to justify
- * taking the I/O threads active: in that case I/O threads are stopped if
- * currently active. We track the pending writes as a measure of clients
- * we need to handle in parallel, however the I/O threading is disabled
- * globally for reads as well if we have too little pending clients.
- *
- * The function returns 0 if the I/O threading should be used because there
- * are enough active threads, otherwise 1 is returned and the I/O threads
- * could be possibly stopped (if already active) as a side effect. */
-int stopThreadedIOIfNeeded(void) {
-    int pending = listLength(server.clients_pending_write);
-
-    /* Return ASAP if IO threads are disabled (single threaded mode). */
-    if (server.io_threads_num == 1) return 1;
-
-    if (pending < (server.io_threads_num*2)) {
-        if (server.io_threads_active) stopThreadedIO();
-        return 1;
-    } else {
-        return 0;
-    }
-}
-
-/* This function achieves thread safety using a fan-out -> fan-in paradigm:
- * Fan out: The main thread fans out work to the io-threads which block until
- * setIOPendingCount() is called with a value larger than 0 by the main thread.
- * Fan in: The main thread waits until getIOPendingCount() returns 0. Then
- * it can safely perform post-processing and return to normal synchronous
- * work. */
-int handleClientsWithPendingWritesUsingThreads(void) {
-    int processed = listLength(server.clients_pending_write);
-    if (processed == 0) return 0; /* Return ASAP if there are no clients. */
-
-    /* If I/O threads are disabled or we have few clients to serve, don't
-     * use I/O threads, but the boring synchronous code. */
-    if (server.io_threads_num == 1 || stopThreadedIOIfNeeded()) {
-        return handleClientsWithPendingWrites();
-    }
-
-    /* Start threads if needed. */
-    if (!server.io_threads_active) startThreadedIO();
-
-    /* Distribute the clients across N different lists. */
-    listIter li;
-    listNode *ln;
-    listRewind(server.clients_pending_write,&li);
-    int item_id = 0;
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        c->flags &= ~CLIENT_PENDING_WRITE;
-
-        /* Remove clients from the list of pending writes since
-         * they are going to be closed ASAP. */
-        if (c->flags & CLIENT_CLOSE_ASAP) {
-            listUnlinkNode(server.clients_pending_write, ln);
-            continue;
-        }
-
-        /* Since all replicas and replication backlog use global replication
-         * buffer, to guarantee data accessing thread safe, we must put all
-         * replicas client into io_threads_list[0] i.e. main thread handles
-         * sending the output buffer of all replicas. */
-        if (unlikely(clientTypeIsSlave(c))) {
-            listAddNodeTail(io_threads_list[0],c);
-            continue;
-        }
-
-        int target_id = item_id % server.io_threads_num;
-        listAddNodeTail(io_threads_list[target_id],c);
-        item_id++;
-    }
-
-    /* Give the start condition to the waiting threads, by setting the
-     * start condition atomic var. */
-    io_threads_op = IO_THREADS_OP_WRITE;
-    for (int j = 1; j < server.io_threads_num; j++) {
-        int count = listLength(io_threads_list[j]);
-        setIOPendingCount(j, count);
-    }
-
-    /* Also use the main thread to process a slice of clients. */
-    listRewind(io_threads_list[0],&li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        writeToClient(c,0);
-    }
-    listEmpty(io_threads_list[0]);
-
-    /* Wait for all the other threads to end their work. */
-    while(1) {
-        unsigned long pending = 0;
-        for (int j = 1; j < server.io_threads_num; j++)
-            pending += getIOPendingCount(j);
-        if (pending == 0) break;
-    }
-
-    io_threads_op = IO_THREADS_OP_IDLE;
-
-    /* Run the list of clients again to install the write handler where
-     * needed. */
-    listRewind(server.clients_pending_write,&li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-
-        /* Update the client in the mem usage after we're done processing it in the io-threads */
-        updateClientMemUsageAndBucket(c);
-
-        /* Install the write handler if there are pending writes in some
-         * of the clients. */
-        if (clientHasPendingReplies(c)) {
-            installClientWriteHandler(c);
-        }
-    }
-    while(listLength(server.clients_pending_write) > 0) {
-        listUnlinkNode(server.clients_pending_write, server.clients_pending_write->head);
-    }
-
-    /* Update processed count on server */
-    server.stat_io_writes_processed += processed;
-
-    return processed;
 }
 
 /* Return 1 if we want to handle the client read later using threaded I/O.
@@ -4594,100 +4603,6 @@ int postponeClientRead(client *c) {
     } else {
         return 0;
     }
-}
-
-/* When threaded I/O is also enabled for the reading + parsing side, the
- * readable handler will just put normal clients into a queue of clients to
- * process (instead of serving them synchronously). This function runs
- * the queue using the I/O threads, and process them in order to accumulate
- * the reads in the buffers, and also parse the first command available
- * rendering it in the client structures.
- * This function achieves thread safety using a fan-out -> fan-in paradigm:
- * Fan out: The main thread fans out work to the io-threads which block until
- * setIOPendingCount() is called with a value larger than 0 by the main thread.
- * Fan in: The main thread waits until getIOPendingCount() returns 0. Then
- * it can safely perform post-processing and return to normal synchronous
- * work. */
-int handleClientsWithPendingReadsUsingThreads(void) {
-    if (!server.io_threads_active || !server.io_threads_do_reads) return 0;
-    int processed = listLength(server.clients_pending_read);
-    if (processed == 0) return 0;
-
-    /* Distribute the clients across N different lists. */
-    listIter li;
-    listNode *ln;
-    listRewind(server.clients_pending_read,&li);
-    int item_id = 0;
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        int target_id = item_id % server.io_threads_num;
-        listAddNodeTail(io_threads_list[target_id],c);
-        item_id++;
-    }
-
-    /* Give the start condition to the waiting threads, by setting the
-     * start condition atomic var. */
-    io_threads_op = IO_THREADS_OP_READ;
-    for (int j = 1; j < server.io_threads_num; j++) {
-        int count = listLength(io_threads_list[j]);
-        setIOPendingCount(j, count);
-    }
-
-    /* Also use the main thread to process a slice of clients. */
-    listRewind(io_threads_list[0],&li);
-    while((ln = listNext(&li))) {
-        client *c = listNodeValue(ln);
-        readQueryFromClient(c->conn);
-    }
-    listEmpty(io_threads_list[0]);
-
-    /* Wait for all the other threads to end their work. */
-    while(1) {
-        unsigned long pending = 0;
-        for (int j = 1; j < server.io_threads_num; j++)
-            pending += getIOPendingCount(j);
-        if (pending == 0) break;
-    }
-
-    io_threads_op = IO_THREADS_OP_IDLE;
-
-    /* Run the list of clients again to process the new buffers. */
-    while(listLength(server.clients_pending_read)) {
-        ln = listFirst(server.clients_pending_read);
-        client *c = listNodeValue(ln);
-        listDelNode(server.clients_pending_read,ln);
-        c->pending_read_list_node = NULL;
-
-        serverAssert(!(c->flags & CLIENT_BLOCKED));
-
-        if (beforeNextClient(c) == C_ERR) {
-            /* If the client is no longer valid, we avoid
-             * processing the client later. So we just go
-             * to the next. */
-            continue;
-        }
-
-        /* Once io-threads are idle we can update the client in the mem usage */
-        updateClientMemUsageAndBucket(c);
-
-        if (processPendingCommandAndInputBuffer(c) == C_ERR) {
-            /* If the client is no longer valid, we avoid
-             * processing the client later. So we just go
-             * to the next. */
-            continue;
-        }
-
-        /* We may have pending replies if a thread readQueryFromClient() produced
-         * replies and did not put the client in pending write queue (it can't).
-         */
-        if (!(c->flags & CLIENT_PENDING_WRITE) && clientHasPendingReplies(c))
-            putClientInPendingWriteQueue(c);
-    }
-
-    /* Update processed count on server */
-    server.stat_io_reads_processed += processed;
-
-    return processed;
 }
 
 /* Returns the actual client eviction limit based on current configuration or

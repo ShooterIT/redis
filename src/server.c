@@ -1036,35 +1036,35 @@ void clientsCron(void) {
     ClientsPeakMemOutput[zeroidx] = 0;
 
 
-    while(listLength(server.clients) && iterations--) {
-        client *c;
-        listNode *head;
+    // while(listLength(server.clients) && iterations--) {
+    //     client *c;
+    //     listNode *head;
 
-        /* Take the current head, process, and then rotate the head to tail.
-         * This way we can fairly iterate all clients step by step. */
-        head = listFirst(server.clients);
-        c = listNodeValue(head);
-        listRotateHeadToTail(server.clients);
-        /* The following functions do different service checks on the client.
-         * The protocol is that they return non-zero if the client was
-         * terminated. */
-        if (clientsCronHandleTimeout(c,now)) continue;
-        if (clientsCronResizeQueryBuffer(c)) continue;
-        if (clientsCronResizeOutputBuffer(c,now)) continue;
+    //     /* Take the current head, process, and then rotate the head to tail.
+    //      * This way we can fairly iterate all clients step by step. */
+    //     head = listFirst(server.clients);
+    //     c = listNodeValue(head);
+    //     listRotateHeadToTail(server.clients);
+    //     /* The following functions do different service checks on the client.
+    //      * The protocol is that they return non-zero if the client was
+    //      * terminated. */
+    //     if (clientsCronHandleTimeout(c,now)) continue;
+    //     if (clientsCronResizeQueryBuffer(c)) continue;
+    //     if (clientsCronResizeOutputBuffer(c,now)) continue;
 
-        if (clientsCronTrackExpansiveClients(c, curr_peak_mem_usage_slot)) continue;
+    //     if (clientsCronTrackExpansiveClients(c, curr_peak_mem_usage_slot)) continue;
 
-        /* Iterating all the clients in getMemoryOverheadData() is too slow and
-         * in turn would make the INFO command too slow. So we perform this
-         * computation incrementally and track the (not instantaneous but updated
-         * to the second) total memory used by clients using clientsCron() in
-         * a more incremental way (depending on server.hz).
-         * If client eviction is enabled, update the bucket as well. */
-        if (!updateClientMemUsageAndBucket(c))
-            updateClientMemoryUsage(c);
+    //     /* Iterating all the clients in getMemoryOverheadData() is too slow and
+    //      * in turn would make the INFO command too slow. So we perform this
+    //      * computation incrementally and track the (not instantaneous but updated
+    //      * to the second) total memory used by clients using clientsCron() in
+    //      * a more incremental way (depending on server.hz).
+    //      * If client eviction is enabled, update the bucket as well. */
+    //     if (!updateClientMemUsageAndBucket(c))
+    //         updateClientMemoryUsage(c);
 
-        if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
-    }
+    //     if (closeClientOnOutputBufferLimitReached(c, 0)) continue;
+    // }
 }
 
 /* This function handles 'background' operations we are required to do
@@ -1403,7 +1403,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     }
 
     /* We need to do a few operations on clients asynchronously. */
-    clientsCron();
+    // clientsCron();
 
     /* Handle background operations on Redis databases. */
     databasesCron();
@@ -1512,9 +1512,6 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     run_with_period(1000) {
         migrateCloseTimedoutSockets();
     }
-
-    /* Stop the I/O threads if we don't have enough pending work. */
-    stopThreadedIOIfNeeded();
 
     /* Resize tracking keys table if needed. This is also done at every
      * command execution, but we want to be sure that if the last command
@@ -1639,6 +1636,7 @@ static void sendGetackToReplicas(void) {
 
 extern int ProcessingEventsWhileBlocked;
 
+
 /* This function gets called every time Redis is entering the
  * main loop of the event driven library, that is, before to sleep
  * for ready file descriptors.
@@ -1667,18 +1665,18 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
      * events to handle. */
     if (ProcessingEventsWhileBlocked) {
         uint64_t processed = 0;
-        processed += handleClientsWithPendingReadsUsingThreads();
+        // processed += handleClientsWithPendingReadsUsingThreads();
         processed += connTypeProcessPendingData();
         if (server.aof_state == AOF_ON || server.aof_state == AOF_WAIT_REWRITE)
             flushAppendOnlyFile(0);
-        processed += handleClientsWithPendingWrites();
+        // processed += handleClientsWithPendingWrites();
         processed += freeClientsInAsyncFreeQueue();
         server.events_processed_while_blocked += processed;
         return;
     }
 
     /* We should handle pending reads clients ASAP after event loop. */
-    handleClientsWithPendingReadsUsingThreads();
+    // handleClientsWithPendingReadsUsingThreads();
 
     /* Handle pending data(typical TLS). (must be done before flushAppendOnlyFile) */
     connTypeProcessPendingData();
@@ -1773,7 +1771,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     }
 
     /* Handle writes with pending output buffers. */
-    handleClientsWithPendingWritesUsingThreads();
+    // handleClientsWithPendingWritesUsingThreads();
 
     /* Record cron time in beforeSleep. This does not include the time consumed by AOF writing and IO writing above. */
     monotime cron_start_time_after_write = getMonotonicUs();
@@ -1788,6 +1786,18 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
     /* Disconnect some clients if they are consuming too much memory. */
     evictClients();
+
+    if (server.io_threads_num) {
+        /* Empty the inbox from I/O threads. */
+        handleMessagesFromIOThreads();
+        //atomicSetWithSync(server.sleeping, 1);
+        /* Handle any messages sent before we set the sleeping flag. */
+        //handleMessagesFromIOThreads();
+        // if (listLength(server.clients_pending_write) > 0) {
+        //     /* We need to send these after fsynching the AOF next time. */
+        //     dont_sleep = 1;
+        // }
+    }
 
     /* Record cron time in beforeSleep. */
     monotime duration_after_write = getMonotonicUs() - cron_start_time_after_write;
@@ -1859,6 +1869,8 @@ void afterSleep(struct aeEventLoop *eventLoop) {
     if (!ProcessingEventsWhileBlocked) {
         server.cmd_time_snapshot = server.mstime;
     }
+
+    //atomicSet(server.sleeping, 0);
 }
 
 /* =========================== Server initialization ======================== */
@@ -2540,6 +2552,15 @@ int listenToPort(connListener *sfd) {
 void resetServerStats(void) {
     int j;
 
+    // server.jobs = listCreate();
+    // if (anetPipe(server.pipeexec, O_NONBLOCK, O_NONBLOCK) == -1) {
+    //     serverLog(LL_WARNING,"Fatal: Can't initialize Pipe.");
+    // }
+    // if (aeCreateFileEvent(server.el, server.pipeexec[0], AE_READABLE, handleExecute, NULL) != AE_OK) {
+    //     serverLog(LL_WARNING,"Fatal: Can't create file event for compressor thread notifications.");
+    //     exit(1);
+    // }
+    
     server.stat_numcommands = 0;
     server.stat_numconnections = 0;
     server.stat_expiredkeys = 0;
@@ -2680,6 +2701,7 @@ void initServer(void) {
             strerror(errno));
         exit(1);
     }
+    //atomicSet(server.sleeping, 0);
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     /* Create the Redis databases, and initialize other internal state. */
