@@ -3112,8 +3112,7 @@ sds getAllClientsInfoString(int type) {
     int allpaused = 0;
     if (server.io_threads_num > 1 && !server.crashing &&
         (type == CLIENT_TYPE_NORMAL || type == -1) &&
-        pthread_equal(server.main_thread_id, pthread_self()) &&
-        listLength(server.clients) > (size_t)server.io_threads_num * 2)
+        pthread_equal(server.main_thread_id, pthread_self()))
     {
         allpaused = 1;
         pauseAllIOThreads();
