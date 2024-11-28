@@ -73,6 +73,8 @@ void keepClientInMainThread(client *c) {
 /* If the client is managed by IO thread, we should fetch it from IO thread
  * and put it in the main thread, and then main thread will manage it. */
 void fetchClientFromIOThread(client *c) {
+    serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID &&
+                 c->running_tid != IOTHREAD_MAIN_THREAD_ID);
     /* 1. Unbind client from clients list. */
     pauseIOThread(c->tid);
     if (c->io_thread_client_list_node) {
