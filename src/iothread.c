@@ -42,7 +42,8 @@ void putInPendingClienstForMainThread(client *c, int uninstall_handler) {
 /* Uninstall read and write handler of a client from io thread event loop,
  * to make sure that we can operate the client safely. */
 void uninstallHandlerFromIOThreadEventLoop(client *c) {
-    serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID);
+    serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID &&
+                 c->running_tid == IOTHREAD_MAIN_THREAD_ID);
     if (!connHasReadHandler(c->conn) && !connHasWriteHandler(c->conn)) return;
     /* As calling in main thread, we should pause the io thread to make it safe. */
     pauseIOThread(c->tid);
@@ -55,7 +56,8 @@ void uninstallHandlerFromIOThreadEventLoop(client *c) {
  * we should uninstall read and write handler from io thread event loop first,
  * and then bind the client connection into server's event loop. */
 void keepClientInMainThread(client *c) {
-    serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID);
+    serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID &&
+                 c->running_tid == IOTHREAD_MAIN_THREAD_ID);
     /* IO thread no longer manage it. */
     server.io_threads_clients_num[c->tid]--;
     /* Remove the client from io thread event loop. */
@@ -71,39 +73,38 @@ void keepClientInMainThread(client *c) {
 }
 
 /* If the client is managed by IO thread, we should fetch it from IO thread
- * and put it in the main thread, and then main thread will manage it. */
+ * and then main thread will can process it. */
 void fetchClientFromIOThread(client *c) {
     serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID &&
                  c->running_tid != IOTHREAD_MAIN_THREAD_ID);
-    /* 1. Unbind client from clients list. */
     pauseIOThread(c->tid);
+    /* Remove the client from clients list of IO thread or main thread. */
     if (c->io_thread_client_list_node) {
         listDelNode(io_threads[c->tid].clients, c->io_thread_client_list_node);
         c->io_thread_client_list_node = NULL;
     } else {
-        /* Remove the client from main thread clients list. */
-        listNode *ln = listSearchKey(pending_clients_for_io_threads[c->tid], c);
-        if (ln) listDelNode(pending_clients_for_io_threads[c->tid], ln);
-        ln = listSearchKey(main_thread_processing_clients[c->tid], c);
-        if (ln) listDelNode(main_thread_processing_clients[c->tid], ln);
-        ln = listSearchKey(main_thread_pending_clients[c->tid], c);
-        if (ln) listDelNode(main_thread_pending_clients[c->tid], ln);
-
-        /* Remove the client from io thread clients list. */
-        ioThread *t = &io_threads[c->tid];
-        ln = listSearchKey(t->pending_clients, c);
-        if (ln) listDelNode(t->pending_clients, ln);
-        ln = listSearchKey(t->pending_clients_for_main_thread, c);
-        if (ln) listDelNode(t->pending_clients_for_main_thread, ln);
+        list *clients[5] = {
+            io_threads[c->tid].pending_clients,
+            io_threads[c->tid].pending_clients_for_main_thread,
+            main_thread_pending_clients[c->tid],
+            main_thread_processing_clients[c->tid],
+            pending_clients_for_io_threads[c->tid]
+        };
+        for (int i = 0; i < 5; i++) {
+            listNode *ln = listSearchKey(clients[i], c);
+            if (ln) {
+                listDelNode(clients[i], ln);
+                /* Client only can be in one client list. */
+                break;
+            }
+        }
     }
     /* Remove event handler from io thread event loop. */
     connSetReadHandler(c->conn, NULL);
     connSetWriteHandler(c->conn, NULL);
+    /* Now main thread can process it. */
+    c->running_tid = IOTHREAD_MAIN_THREAD_ID;
     resumeIOThread(c->tid);
-
-    /* 2. Keep client in main thread */
-    c->running_tid = IOTHREAD_MAIN_THREAD_ID; /* Let main thread to run it */
-    keepClientInMainThread(c);
 }
 
 /* If updating maxclients config, we not only resize the event loop of main thread

@@ -1662,7 +1662,7 @@ void freeClient(client *c) {
     }
 
     /* Update the number of clients in the IO thread. */
-    server.io_threads_clients_num[c->tid]--;
+    if (c->conn) server.io_threads_clients_num[c->tid]--;
 
     /* For connected clients, call the disconnection event of modules hooks. */
     if (c->conn) {
