@@ -1332,7 +1332,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     list *pending_clients_for_main_thread;      /* Clients that are waiting to be executed by the main thread. */
     list *clients;                              /* IO thread managed clients. */
     redisAtomic int paused;                     /* Paused status for the io thread. */
-} ioThread;
+} IOThread;
 
 /* ACL information */
 typedef struct aclInfo {
