@@ -108,7 +108,11 @@ start_server {} {
             $rr write [join [list "*1\r\n\$$maxmemory_clients_actual\r\n" [string repeat v $maxmemory_clients_actual]] ""]
             $rr flush
         } e
-        assert {![client_exists $cname]}
+        wait_for_condition 100 10 {
+            ![client_exists $cname]
+        } else {
+            fail "Failed to evict client"
+        }
         $rr close
 
         # Restore settings
@@ -404,8 +408,11 @@ start_server {} {
 
         # Decrease maxmemory_clients and expect client eviction
         r config set maxmemory-clients [expr $maxmemory_clients / 2]
-        set connected_clients [llength [lsearch -all [split [string trim [r client list]] "\r\n"] *name=client*]]
-        assert {$connected_clients > 0 && $connected_clients < $client_count}
+        wait_for_condition 200 10 {
+            [llength [lsearch -all [split [string trim [r client list]] "\r\n"] *name=client*]] < $client_count
+        } else {
+            fail "Failed to evict clients"
+        }
 
         foreach rr $rrs {$rr close}
     }
