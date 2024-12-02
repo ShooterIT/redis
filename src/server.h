@@ -2762,6 +2762,7 @@ void uninstallHandlerFromIOThreadEventLoop(client *c);
 void processClientsOfAllIOThreads(void);
 void assignClientToIOThread(client *c);
 void fetchClientFromIOThread(client *c);
+int isClientMustHandledByMainThread(client *c);
 
 /* logreqres.c - logging of requests and responses */
 void reqresReset(client *c, int free_buf);

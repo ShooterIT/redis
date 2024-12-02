@@ -73,7 +73,8 @@ void keepClientInMainThread(client *c) {
 }
 
 /* If the client is managed by IO thread, we should fetch it from IO thread
- * and then main thread will can process it. */
+ * and then main thread will can process it. Just like IO Thread transfers
+ * the client to the main thread for processing. */
 void fetchClientFromIOThread(client *c) {
     serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID &&
                  c->running_tid != IOTHREAD_MAIN_THREAD_ID);
@@ -126,6 +127,27 @@ int resizeIOThreadsEventLoop(size_t newsize) {
     return result;
 }
 
+/* For some clients, we must handle them in the main thread, since there is
+ * data race to be processed in IO threads.
+ *
+ * - Close ASAP, we must free the client in main thread.
+ * - Replica, pubsub, monitor, blocked, tracking clients, main thread may
+ *   directly write them a reply when conditions are met.
+ * - Script command with debug may operate connection directly.
+ * - Clients in transaction, we may change the 'flags'.
+ *   TODO: is changing flags safe in main thread? */
+int isClientMustHandledByMainThread(client *c) {
+    if (c->flags & (CLIENT_CLOSE_ASAP | CLIENT_MASTER | CLIENT_SLAVE |
+                    CLIENT_PUBSUB | CLIENT_MONITOR | CLIENT_BLOCKED |
+                    CLIENT_UNBLOCKED | CLIENT_TRACKING | CLIENT_LUA_DEBUG |
+                    CLIENT_LUA_DEBUG_SYNC | CLIENT_MULTI) ||
+        listLength(c->watched_keys) > 0)
+    {
+        return 1;
+    }
+    return 0;
+}
+
 /* When the main thread accepts a new client, it assign the client to the IO thread
  * with the fewest clients. */
 void assignClientToIOThread(client *c) {
@@ -140,10 +162,10 @@ void assignClientToIOThread(client *c) {
     }
 
     /* Assign the client to the IO thread. */
+    server.io_threads_clients_num[c->tid]--;
     c->tid = min_id;
     c->running_tid = min_id;
     server.io_threads_clients_num[min_id]++;
-    server.io_threads_clients_num[IOTHREAD_MAIN_THREAD_ID]--;
 
     /* Uninstall read and write handler, disable read and write, and then put in
      * the list, main thread will send these clients to IO thread in beforeSleep. */
@@ -282,13 +304,6 @@ extern int ProcessingEventsWhileBlocked;
  * a complete command to execute or need to be freed. Note that IO threads never
  * free client since this operation access much server data.
  *
- * And for some clients, we may keep them in the main thread, since they are not
- * suitable to be processed in IO threads.
- * Replica, pubsub, monitor, blocked, tracking, watching clients which main thread
- * may directly operate on them when conditions are met, script command with debug
- * may operate connection directly, we may change flags of client in transaction,
- * so we should keep them in the main thread.
- *
  * Please notice that this function may be called reentrantly, i,e, the same goes
  * for handleClientsFromIOThread and processClientsOfAllIOThreads. For example,
  * when processing script command, it may call processEventsWhileBlocked to
@@ -344,40 +359,20 @@ void processClientsFromIOThread(IOThread *t) {
 
         /* The client only can be processed in the main thread, otherwise data
          * race will happen, since we may touch client's data in main thread. */
-        if (c->flags & CLIENT_CLOSE_ASAP ||
-            c->flags & CLIENT_SLAVE ||
-            c->flags & CLIENT_PUBSUB ||
-            c->flags & CLIENT_MONITOR ||
-            c->flags & CLIENT_BLOCKED ||
-            c->flags & CLIENT_UNBLOCKED ||
-            c->flags & CLIENT_TRACKING ||
-            c->flags & CLIENT_MULTI ||
-            c->flags & CLIENT_LUA_DEBUG ||
-            c->flags & CLIENT_LUA_DEBUG_SYNC)
-        {
+        if (isClientMustHandledByMainThread(c)) {
             keepClientInMainThread(c);
             continue;
         }
 
-        /* If the client is still valid, let io threads handle its writing. */
-        if (c->flags & CLIENT_PENDING_WRITE ||
-            c->flags & (CLIENT_REPLY_SKIP|CLIENT_REPLY_OFF|CLIENT_REPLY_SKIP_NEXT))
-        {
-            /* Remove this client from pending write clients queue of main thread. */
-            if (c->flags & CLIENT_PENDING_WRITE) {
-                c->flags &= ~CLIENT_PENDING_WRITE;
-                listUnlinkNode(server.clients_pending_write, &c->clients_pending_write_node);
-            }
-            c->running_tid = c->tid;
-            listLinkNodeHead(pendingClientsForIOThreads[c->tid], node);
-            node = NULL;
-            continue;
+        /* Remove this client from pending write clients queue of main thread,
+         * And some clients may do not have reply if CLIENT REPLY OFF/SKIP. */
+        if (c->flags & CLIENT_PENDING_WRITE) {
+            c->flags &= ~CLIENT_PENDING_WRITE;
+            listUnlinkNode(server.clients_pending_write, &c->clients_pending_write_node);
         }
-
-        /* TODO: remaining clients are handled by main thread, what's the client status?
-         * it should not reach here? */
-        serverPanic("Unknown client status");
-        keepClientInMainThread(c); /* Keep it mian thread if we don't know its status? */
+        c->running_tid = c->tid;
+        listLinkNodeHead(pendingClientsForIOThreads[c->tid], node);
+        node = NULL;
     }
     if (node) zfree(node);
 

@@ -2161,6 +2161,15 @@ int handleClientsWithPendingWrites(void) {
         /* Don't write to clients that are going to be closed anyway. */
         if (c->flags & CLIENT_CLOSE_ASAP) continue;
 
+        /* Let IO thread handle the client if possible. */
+        if (server.io_threads_num > 1 &&
+            !(c->flags & CLIENT_CLOSE_AFTER_REPLY) &&
+            !isClientMustHandledByMainThread(c))
+        {
+            assignClientToIOThread(c);
+            continue;
+        }
+
         /* Try to write buffers to the client socket. */
         if (writeToClient(c,0) == C_ERR) continue;
 
