@@ -928,6 +928,7 @@ test {IO threads client number} {
         set iothread_clients [s io_thread_1_clients]
         assert_equal $iothread_clients [s connected_clients]
         assert_equal [s main_thread_clients] 0
+
         r script debug yes ; # Transfer to main thread
         assert_equal [s main_thread_clients] 1
         assert_equal [s io_thread_1_clients] [expr $iothread_clients - 1]
@@ -944,6 +945,10 @@ test {IO threads client number} {
             fail "Fail to close clients of io thread 1"
         }
         assert_equal [s main_thread_clients] 1
+
+        r script debug no ; # Transfer to io thread
+        assert_equal [s main_thread_clients] 0
+        assert_equal [s io_thread_1_clients] [expr $iothread_clients + 1]
     }
 }
 
