@@ -119,7 +119,6 @@ int resizeIOThreadsEventLoop(size_t newsize) {
     pauseAllIOThreads();
     for (int i = 1; i < server.io_threads_num; i++) {
         IOThread *t = &IOThreads[i];
-        /* If one thread is failed, it is failed totally. */
         if (aeResizeSetSize(t->el, newsize) == AE_ERR)
             result = AE_ERR;
     }
@@ -133,15 +132,12 @@ int resizeIOThreadsEventLoop(size_t newsize) {
  * - Close ASAP, we must free the client in main thread.
  * - Replica, pubsub, monitor, blocked, tracking clients, main thread may
  *   directly write them a reply when conditions are met.
- * - Script command with debug may operate connection directly.
- * - Clients in transaction, we may change the 'flags'.
- *   TODO: is changing flags safe in main thread? */
+ * - Script command with debug may operate connection directly. */
 int isClientMustHandledByMainThread(client *c) {
     if (c->flags & (CLIENT_CLOSE_ASAP | CLIENT_MASTER | CLIENT_SLAVE |
                     CLIENT_PUBSUB | CLIENT_MONITOR | CLIENT_BLOCKED |
                     CLIENT_UNBLOCKED | CLIENT_TRACKING | CLIENT_LUA_DEBUG |
-                    CLIENT_LUA_DEBUG_SYNC | CLIENT_MULTI) ||
-        listLength(c->watched_keys) > 0)
+                    CLIENT_LUA_DEBUG_SYNC))
     {
         return 1;
     }
@@ -333,7 +329,7 @@ void processClientsFromIOThread(IOThread *t) {
         if (c->read_error) handleClientReadError(c);
 
         /* The client is asked to close. */
-        if (c->io_flags & CLIENT_IO_CLOSE_ASYNC) {
+        if (c->io_flags & CLIENT_IO_CLOSE_ASAP) {
             freeClient(c);
             continue;
         }
@@ -451,18 +447,14 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     serverAssert(fd == getReadEventFd(t->pending_clients_notifier));
     handleEventNotifier(t->pending_clients_notifier);
 
-    list *clients = listCreate();
     pthread_mutex_lock(&t->pending_clients_mutex);
-    listJoin(clients, t->pending_clients);
+    listJoin(t->processing_clients, t->pending_clients);
     pthread_mutex_unlock(&t->pending_clients_mutex);
-    if (listLength(clients) == 0) {
-        listRelease(clients);
-        return;
-    }
+    if (listLength(t->processing_clients) == 0) return;
 
     listIter li;
     listNode *ln;
-    listRewind(clients, &li);
+    listRewind(t->processing_clients, &li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
         serverAssert(!(c->io_flags & (CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED)));
@@ -476,7 +468,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
         c->io_thread_client_list_node = listLast(t->clients);
 
         /* The client is asked to close, we just let main thread free it. */
-        if (c->io_flags & CLIENT_IO_CLOSE_ASYNC) {
+        if (c->io_flags & CLIENT_IO_CLOSE_ASAP) {
             putInPendingClienstForMainThread(c, 1);
             continue;
         }
@@ -494,12 +486,12 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
         /* If the client has pending replies, write replies to client. */
         if (clientHasPendingReplies(c)) {
             writeToClient(c, 0);
-            if (!(c->io_flags & CLIENT_IO_CLOSE_ASYNC) && clientHasPendingReplies(c)) {
+            if (!(c->io_flags & CLIENT_IO_CLOSE_ASAP) && clientHasPendingReplies(c)) {
                 connSetWriteHandler(c->conn, sendReplyToClient);
             }
         }
     }
-    listRelease(clients);
+    listEmpty(t->processing_clients);
 }
 
 void IOThreadBeforeSleep(struct aeEventLoop *el) {
@@ -530,36 +522,6 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
     }
 }
 
-#define IO_THREAD_CRON_CLIENTS_ITERATIONS 10
-/* Do the cron job in IO thread, now only support to handle clients and check. */
-int IOThreadCron(struct aeEventLoop *eventLoop, long long id, void *ptr) {
-    UNUSED(eventLoop);
-    UNUSED(id);
-
-    IOThread *t = ptr;
-
-    /* Clients cron in io thread, and iterate over all clients in 1s. */
-    int iterations = max(IO_THREAD_CRON_CLIENTS_ITERATIONS, listLength(t->clients)/10);
-    iterations = min(iterations, (int)listLength(t->clients));
-    while (listLength(t->clients) && iterations--) {
-        listNode *head = listFirst(t->clients);
-        client *c = listNodeValue(head);
-        listRotateHeadToTail(t->clients);
-
-        serverAssert(c->tid == t->id);
-        serverAssert(c->running_tid == t->id);
-        serverAssert(connHasReadHandler(c->conn));
-
-        /* The client is asked to close, let main thread to free finally. */
-        if (c->io_flags & CLIENT_IO_CLOSE_ASYNC) {
-            putInPendingClienstForMainThread(c, 1);
-            continue;
-        }
-    }
-
-    return 100; /* Run once per 100 millisecond */
-}
-
 /* The main function of IO thread, it will run an event loop. The mian thread
  * and IO thread will communicate through event notifier. */
 void *IOThreadMain(void *ptr) {
@@ -570,7 +532,6 @@ void *IOThreadMain(void *ptr) {
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
     aeSetBeforeSleepProc(t->el, IOThreadBeforeSleep);
-    t->el->privdata = t;
     aeMain(t->el);
     return NULL;
 }
@@ -592,7 +553,9 @@ void initThreadedIO(void) {
         IOThread *t = &IOThreads[i];
         t->id = i;
         t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
+        t->el->privdata = t;
         t->pending_clients = listCreate();
+        t->processing_clients = listCreate();
         t->pending_clients_for_main_thread = listCreate();
         t->clients = listCreate();
         t->pending_clients_notifier = createEventNotifier();
@@ -609,11 +572,6 @@ void initThreadedIO(void) {
                               AE_READABLE, handleClientsFromMainThread, t) != AE_OK)
         {
             serverLog(LL_WARNING, "Fatal: Can't register file event for IO thread notifications.");
-            exit(1);
-        }
-
-        if (aeCreateTimeEvent(t->el, 1, IOThreadCron, t, NULL) != AE_OK) {
-            serverLog(LL_WARNING, "Fatal: Can't create event loop timers for IO thread.");
             exit(1);
         }
 

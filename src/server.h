@@ -402,7 +402,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_IO_WRITE_ENABLED (1ULL<<1) /* Client can write to socket. */
 #define CLIENT_IO_PENDING_COMMAND (1ULL<<2) /* Similar to CLIENT_PENDING_COMMAND. */
 #define CLIENT_IO_REUSABLE_QUERYBUFFER (1ULL<<3) /* The client is using the reusable query buffer. */
-#define CLIENT_IO_CLOSE_ASYNC (1ULL<<4) /* Close this client async */
+#define CLIENT_IO_CLOSE_ASAP (1ULL<<4) /* Close this client ASAP in IO thread. */
 
 /* Definitions for client read errors. These error codes are used to indicate
  * various issues that can occur while reading or parsing data from a client. */
@@ -1327,6 +1327,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     pthread_t tid;                              /* Thread ID */
     aeEventLoop *el;                            /* Main event loop of io thread. */
     list *pending_clients;                      /* List of clients with pending writes. */
+    list *processing_clients;                   /* List of clients being processed. */
     eventNotifier *pending_clients_notifier;    /* Used to wake up the loop when write should be performed. */
     pthread_mutex_t pending_clients_mutex;      /* Mutex for pending write list */
     list *pending_clients_for_main_thread;      /* Clients that are waiting to be executed by the main thread. */

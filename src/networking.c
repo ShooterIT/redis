@@ -1650,7 +1650,7 @@ void freeClient(client *c) {
         return;
     }
 
-    /* If the client is running in a io thread, we can't free it directly. */
+    /* If the client is running in io thread, we can't free it directly. */
     if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
         fetchClientFromIOThread(c);
     }
@@ -1825,8 +1825,8 @@ void freeClientAsync(client *c) {
         int main_thread = pthread_equal(pthread_self(), server.main_thread_id);
         /* Make sure the main thread can access IO thread data safely. */
         if (main_thread) pauseIOThread(c->tid);
-        if (!(c->flags & CLIENT_IO_CLOSE_ASYNC)) {
-            c->io_flags |= CLIENT_IO_CLOSE_ASYNC;
+        if (!(c->flags & CLIENT_IO_CLOSE_ASAP)) {
+            c->io_flags |= CLIENT_IO_CLOSE_ASAP;
             putInPendingClienstForMainThread(c, 1);
         }
         if (main_thread) resumeIOThread(c->tid);
