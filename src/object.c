@@ -287,6 +287,7 @@ robj *createModuleObject(moduleType *mt, void *value) {
 
 void freeStringObject(robj *o) {
     if (o->encoding == OBJ_ENCODING_RAW) {
+        if (isstringview(o->ptr)) return;
         sdsfree(o->ptr);
     }
 }
@@ -349,6 +350,15 @@ void freeStreamObject(robj *o) {
 void incrRefCount(robj *o) {
     if (o->refcount < OBJ_FIRST_SPECIAL_REFCOUNT) {
         o->refcount++;
+        if (o->encoding == OBJ_ENCODING_RAW) {
+            if (isstringview(o->ptr)) {
+                serverAssert(o->refcount == 2);
+                /* We need to retain the sds string view object. */
+                sds new = sdsdup(o->ptr);
+                o->ptr = new;
+                return;
+            }
+        }
     } else {
         if (o->refcount == OBJ_SHARED_REFCOUNT) {
             /* Nothing to do: this refcount is immutable. */

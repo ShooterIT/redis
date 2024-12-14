@@ -2520,8 +2520,17 @@ int processMultibulkBuffer(client *c) {
                 c->querybuf = sdsnewlen(SDS_NOINIT,c->bulklen+2);
                 sdsclear(c->querybuf);
             } else {
-                c->argv[c->argc++] =
-                    createStringObject(c->querybuf+c->qb_pos,c->bulklen);
+                if (!(c->flags & CLIENT_MASTER) && c->bulklen > 0 && c->bulklen < (1<<16)) {
+                    struct sdshdr16 *view = (struct sdshdr16 *)(c->querybuf+c->qb_pos - sizeof(struct sdshdr16));
+                    view->len = c->bulklen;
+                    view->alloc = c->bulklen;
+                    view->flags = (SDS_TYPE_16 | SDS_FLAG_STRINGVIEW);
+                    view->buf[view->len] = '\0';
+                    c->argv[c->argc++] = createObject(OBJ_STRING, view->buf);
+                } else {
+                    c->argv[c->argc++] =
+                        createStringObject(c->querybuf+c->qb_pos,c->bulklen);
+                }
                 c->argv_len_sum += c->bulklen;
                 c->qb_pos += c->bulklen+2;
             }
@@ -2724,9 +2733,14 @@ int processInputBuffer(client *c) {
             c->repl_applied = 0;
         }
     } else if (c->qb_pos) {
-        /* Trim to pos */
-        sdsrange(c->querybuf,c->qb_pos,-1);
-        c->qb_pos = 0;
+        if (c->multibulklen == 0 && c->argc == 0) {
+            sdsrange(c->querybuf,c->qb_pos,-1);
+            c->qb_pos = 0;
+        } else if (c->flags & CLIENT_REUSABLE_QUERYBUFFER) {
+            thread_reusable_qb = NULL;
+            c->flags &= ~CLIENT_REUSABLE_QUERYBUFFER;
+            thread_reusable_qb_used = 0;
+        }
     }
 
     /* Update client memory usage after processing the query buffer, this is
@@ -2777,7 +2791,7 @@ void readQueryFromClient(connection *conn) {
         if (c->flags & CLIENT_MASTER && readlen < PROTO_IOBUF_LEN)
             readlen = PROTO_IOBUF_LEN;
     } else if (c->querybuf == NULL) {
-        if (unlikely(thread_reusable_qb_used)) {
+        if (server.io_threads_num > 1 || unlikely(thread_reusable_qb_used)) {
             /* The reusable query buffer is already used by another client,
              * switch to using the client's private query buffer. This only
              * occurs when commands are executed nested via processEventsWhileBlocked(). */
