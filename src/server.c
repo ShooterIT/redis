@@ -521,7 +521,8 @@ dictType commandTableDictType = {
     dictSdsKeyCaseCompare,      /* key compare */
     dictSdsDestructor,          /* key destructor */
     NULL,                       /* val destructor */
-    NULL                        /* allow to expand */
+    NULL,                       /* allow to expand */
+    .force_full_rehash = 1,     /* force full rehashing */
 };
 
 /* Hash type hash table (note that small hashes are represented with listpacks) */
@@ -3973,7 +3974,8 @@ int processCommand(client *c) {
      * In case we are reprocessing a command after it was blocked,
      * we do not have to repeat the same checks */
     if (!client_reprocessing_command) {
-        c->cmd = c->lastcmd = c->realcmd = lookupCommand(c->argv,c->argc);
+        c->cmd = c->lastcmd = c->realcmd = c->iolookedcmd ? c->iolookedcmd :
+                                           lookupCommand(c->argv,c->argc);
         sds err;
         if (!commandCheckExistence(c, &err)) {
             rejectCommandSds(c, err);

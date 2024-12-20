@@ -275,6 +275,12 @@ int _dictResize(dict *d, unsigned long size, int* malloc_failed)
         return DICT_OK;
     }
 
+    /* Force a full rehashing of the dictionary */
+    if (d->type->force_full_rehash) {
+        while (dictRehash(d, 1000)) {
+            /* Continue rehashing */
+        }
+    }
     return DICT_OK;
 }
 

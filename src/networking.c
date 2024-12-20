@@ -159,7 +159,7 @@ client *createClient(connection *conn) {
     c->argv_len_sum = 0;
     c->original_argc = 0;
     c->original_argv = NULL;
-    c->cmd = c->lastcmd = c->realcmd = NULL;
+    c->cmd = c->lastcmd = c->realcmd = c->iolookedcmd = NULL;
     c->cur_script = NULL;
     c->multibulklen = 0;
     c->bulklen = -1;
@@ -1449,6 +1449,7 @@ void freeClientArgv(client *c) {
         decrRefCount(c->argv[j]);
     c->argc = 0;
     c->cmd = NULL;
+    c->iolookedcmd = NULL;
     c->argv_len_sum = 0;
     c->argv_len = 0;
     zfree(c->argv);
@@ -2754,6 +2755,7 @@ int processInputBuffer(client *c) {
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
                 c->io_flags |= CLIENT_IO_PENDING_COMMAND;
+                c->iolookedcmd = lookupCommand(c->argv, c->argc);
                 enqueuePendingClientsToMainThread(c, 0);
                 break;
             }

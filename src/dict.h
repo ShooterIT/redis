@@ -62,6 +62,10 @@ typedef struct dictType {
     unsigned int keys_are_odd:1;
     /* TODO: Add a 'keys_are_even' flag and use a similar optimization if that
      * flag is set. */
+
+    /* Ensures that the entire hash table is rehashed at once if set. */
+    unsigned int force_full_rehash:1;
+
     /* Sometimes we want the ability to store a key in a given way inside the hash
      * function, and lookup it in some other way without resorting to any kind of
      * conversion. For instance the key may be stored as a structure also

@@ -195,7 +195,7 @@ static int PausedIOThreads[IO_THREADS_MAX_NUM] = {0};
 
 /* Pause the specific range of io threads, and wait for them to be paused. */
 void pauseIOThreadsRange(int start, int end) {
-    if (server.io_threads_num <= 1) return;
+    if (!server.io_threads_active) return;
     serverAssert(start >= 1 && end < server.io_threads_num && start <= end);
     serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
 
@@ -227,7 +227,7 @@ void pauseIOThreadsRange(int start, int end) {
 
 /* Resume the specific range of io threads, and wait for them to be resumed. */
 void resumeIOThreadsRange(int start, int end) {
-    if (server.io_threads_num <= 1) return;
+    if (!server.io_threads_active) return;
     serverAssert(start >= 1 && end < server.io_threads_num && start <= end);
     serverAssert(pthread_equal(pthread_self(), server.main_thread_id));
 
