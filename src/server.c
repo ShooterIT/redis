@@ -2957,6 +2957,7 @@ void InitServerLast(void) {
     bioInit();
     initThreadedIO();
     set_jemalloc_bg_thread(server.jemalloc_bg_thread);
+    zmalloc_main_thread_check();
     server.initial_memory_usage = zmalloc_used_memory();
 }
 
@@ -7096,6 +7097,9 @@ int main(int argc, char **argv) {
     int j;
     char config_from_stdin = 0;
 
+    zmalloc_main_thread_init();
+    zmalloc_set_oom_handler(redisOutOfMemoryHandler);
+
 #ifdef REDIS_TEST
     monotonicInit(); /* Required for dict tests, that are relying on monotime during dict rehashing. */
     if (argc >= 3 && !strcasecmp(argv[1], "test")) {
@@ -7144,7 +7148,6 @@ int main(int argc, char **argv) {
     spt_init(argc, argv);
 #endif
     tzset(); /* Populates 'timezone' global. */
-    zmalloc_set_oom_handler(redisOutOfMemoryHandler);
 
     /* To achieve entropy, in case of containers, their time() and getpid() can
      * be the same. But value of tv_usec is fast enough to make the difference */

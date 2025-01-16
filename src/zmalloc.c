@@ -76,25 +76,30 @@ typedef struct used_memory_entry {
     char padding[CACHE_LINE_SIZE - sizeof(long long)];
 } used_memory_entry;
 
-static __attribute__((aligned(CACHE_LINE_SIZE))) used_memory_entry used_memory[MAX_THREADS];
-static redisAtomic size_t num_active_threads = 0;
-static __thread long my_thread_index = -1;
+static __thread long is_main_thread = 0;
+static long long main_thread_used_memory = 0;
+static __attribute__((aligned(CACHE_LINE_SIZE))) used_memory_entry other_threads_used_memory = {0};
 
-static inline void init_my_thread_index(void) {
-    if (unlikely(my_thread_index == -1)) {
-        atomicGetIncr(num_active_threads, my_thread_index, 1);
-        my_thread_index &= THREAD_MASK;
-    }
+void zmalloc_main_thread_init(void) {
+    is_main_thread = 1;
 }
 
-static void update_zmalloc_stat_alloc(long long num) {
-    init_my_thread_index();
-    atomicIncr(used_memory[my_thread_index].used_memory, num);
+void zmalloc_main_thread_check(void) {
+    assert(is_main_thread == 1);
 }
 
-static void update_zmalloc_stat_free(long long num) {
-    init_my_thread_index();
-    atomicDecr(used_memory[my_thread_index].used_memory, num);
+static inline void update_zmalloc_stat_alloc(long long num) {
+    if (likely(is_main_thread == 1))
+        main_thread_used_memory += num;
+    else 
+        atomicIncr(other_threads_used_memory.used_memory, num);
+}
+
+static inline void update_zmalloc_stat_free(long long num) {
+    if (likely(is_main_thread == 1))
+        main_thread_used_memory -= num;
+    else
+        atomicDecr(other_threads_used_memory.used_memory, num);
 }
 
 static void zmalloc_default_oom(size_t size) {
@@ -461,17 +466,9 @@ char *zstrdup(const char *s) {
 }
 
 size_t zmalloc_used_memory(void) {
-    size_t local_num_active_threads;
     long long total_mem = 0;
-    atomicGet(num_active_threads,local_num_active_threads);
-    if (local_num_active_threads > MAX_THREADS) {
-        local_num_active_threads = MAX_THREADS;
-    }
-    for (size_t i = 0; i < local_num_active_threads; ++i) {
-        long long thread_used_mem;
-        atomicGet(used_memory[i].used_memory, thread_used_mem);
-        total_mem += thread_used_mem;
-    }
+    atomicGet(other_threads_used_memory.used_memory, total_mem);
+    total_mem += main_thread_used_memory;
     return total_mem;
 }
 
