@@ -2095,7 +2095,7 @@ static inline int _writeToClientSlave(client *c, ssize_t *nwritten) {
 int writeToClient(client *c, int handler_installed) {
     if (!(c->io_flags & CLIENT_IO_WRITE_ENABLED)) return C_OK;
     /* Update the number of writes of io threads on server */
-    atomicIncr(server.stat_io_writes_processed[c->running_tid], 1);
+    // atomicIncr(server.stat_io_writes_processed[c->running_tid], 1);
 
     ssize_t nwritten = 0, totwritten = 0;
     const int is_slave = clientTypeIsSlave(c);
@@ -2137,7 +2137,7 @@ int writeToClient(client *c, int handler_installed) {
                 zmalloc_used_memory() < server.maxmemory) &&
                 is_normal_client) break;
         }
-        atomicIncr(server.stat_net_output_bytes, totwritten);
+        // atomicIncr(server.stat_net_output_bytes, totwritten);
     }
 
     if (nwritten == -1) {
@@ -2883,7 +2883,7 @@ void readQueryFromClient(connection *conn) {
     c->read_error = 0;
 
     /* Update the number of reads of io threads on server */
-    atomicIncr(server.stat_io_reads_processed[c->running_tid], 1);
+    // atomicIncr(server.stat_io_reads_processed[c->running_tid], 1);
 
     readlen = PROTO_IOBUF_LEN;
     /* If this is a multi bulk request, and we are processing a bulk reply
@@ -2975,7 +2975,7 @@ void readQueryFromClient(connection *conn) {
         c->read_reploff += nread;
         atomicIncr(server.stat_net_repl_input_bytes, nread);
     } else {
-        atomicIncr(server.stat_net_input_bytes, nread);
+        // atomicIncr(server.stat_net_input_bytes, nread);
     }
 
     if (!(c->flags & CLIENT_MASTER) &&
