@@ -768,6 +768,7 @@ void aofOpenIfNeededOnServerStart(void) {
 
     server.aof_last_incr_size = getAppendOnlyFileSize(aof_name, NULL);
     server.aof_last_incr_fsync_offset = server.aof_last_incr_size;
+    server.aof_last_incr_async_offset = server.aof_last_incr_size;
 
     if (incr_aof_len) {
         serverLog(LL_NOTICE, "Opening AOF incr file %s on server start", aof_name);
@@ -851,6 +852,7 @@ int openNewIncrAofForAppend(void) {
     server.aof_last_incr_size = 0;
     /* Reset the aof_last_incr_fsync_offset. */
     server.aof_last_incr_fsync_offset = 0;
+    server.aof_last_incr_async_offset = 0;
     /* Update `server.aof_manifest`. */
     if (temp_am) aofManifestFreeAndUpdate(temp_am);
     return C_OK;
@@ -1019,6 +1021,7 @@ void stopAppendOnly(void) {
     server.aof_rewrite_scheduled = 0;
     server.aof_last_incr_size = 0;
     server.aof_last_incr_fsync_offset = 0;
+    server.aof_last_incr_async_offset = 0;
     server.fsynced_reploff = -1;
     atomicSet(server.fsynced_reploff_pending, 0);
     killAppendOnlyChild();
@@ -1347,6 +1350,15 @@ try_fsync:
         }
         server.aof_last_fsync = server.mstime;
     }
+#ifdef SYNC_FILE_RANGE_WRITE
+    else if (!sync_in_progress &&
+             server.aof_last_incr_size >= server.aof_last_incr_async_offset + 2*16*1024*1024)
+    {
+        sync_file_range(server.aof_fd, server.aof_last_incr_async_offset,
+                        16*1024*1024, SYNC_FILE_RANGE_WRITE);
+        server.aof_last_incr_async_offset += 16*1024*1024;
+    }
+#endif
 }
 
 sds catAppendOnlyGenericCommand(sds dst, int argc, robj **argv) {

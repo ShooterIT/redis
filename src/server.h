@@ -1898,6 +1898,7 @@ struct redisServer {
     off_t aof_last_incr_size;       /* The size of the latest incr AOF. */
     off_t aof_last_incr_fsync_offset; /* AOF offset which is already requested to be synced to disk.
                                        * Compare with the aof_last_incr_size. */
+    off_t aof_last_incr_async_offset;
     int aof_flush_sleep;            /* Micros to sleep before flush. (used by tests) */
     int aof_rewrite_scheduled;      /* Rewrite once BGSAVE terminates. */
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
