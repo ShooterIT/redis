@@ -498,6 +498,12 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
             continue;
         }
 
+        /* Free object from main thread. */
+        for (int i = 0; i < c->free_obj_index; i++) {
+            decrRefCount(c->free_objs[i]);
+        }
+        c->free_obj_index = 0;
+
         /* Enable read and write and reset some flags. */
         c->io_flags |= CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED;
         c->io_flags &= ~CLIENT_IO_PENDING_COMMAND;

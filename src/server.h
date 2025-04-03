@@ -1268,6 +1268,7 @@ typedef struct {
 } clientReqResInfo;
 #endif
 
+#define CLIENT_FREE_OBJS_MAX 32 /* Max number of objects to free after the command. */
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1286,6 +1287,8 @@ typedef struct client {
     size_t querybuf_peak;   /* Recent (100ms or more) peak of querybuf size. */
     int argc;               /* Num of arguments of current command. */
     robj **argv;            /* Arguments of current command. */
+    robj *free_objs[CLIENT_FREE_OBJS_MAX];       /* Array of objects to free after the command. */
+    int free_obj_index;   /* Index of the free_objs array. */
     int argv_len;           /* Size of argv array (may be more than argc) */
     int original_argc;      /* Num of arguments of original command if arguments were rewritten. */
     robj **original_argv;   /* Arguments of original command if arguments were rewritten. */

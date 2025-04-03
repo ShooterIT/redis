@@ -339,7 +339,7 @@ static void dbSetValue(redisDb *db, robj *key, robj *val, int overwrite, dictEnt
     robj *old = dictGetVal(de);
 
     /* Remove old key from keysizes histogram */
-    updateKeysizesHist(db, slot, old->type, getObjectLength(old), -1); /* remove hist */
+    //updateKeysizesHist(db, slot, old->type, getObjectLength(old), -1); /* remove hist */
 
     val->lru = old->lru;
 
@@ -360,7 +360,7 @@ static void dbSetValue(redisDb *db, robj *key, robj *val, int overwrite, dictEnt
     kvstoreDictSetVal(db->keys, slot, de, val);
 
     /* Add new key to keysizes histogram */
-    updateKeysizesHist(db, slot, val->type, -1, getObjectLength(val));
+    //updateKeysizesHist(db, slot, val->type, -1, getObjectLength(val));
 
     /* if hash with HFEs, take care to remove from global HFE DS */
     if (old->type == OBJ_HASH)
@@ -369,7 +369,14 @@ static void dbSetValue(redisDb *db, robj *key, robj *val, int overwrite, dictEnt
     if (server.lazyfree_lazy_server_del) {
         freeObjAsync(key,old,db->id);
     } else {
-        decrRefCount(old);
+        if (old->refcount == 1 && old->encoding == OBJ_ENCODING_RAW &&
+            server.current_client && server.current_client->tid != IOTHREAD_MAIN_THREAD_ID &&
+            server.current_client->free_obj_index < CLIENT_FREE_OBJS_MAX)
+        {
+            server.current_client->free_objs[server.current_client->free_obj_index++] = old;
+        } else {
+            decrRefCount(old);
+        }
     }
 }
 

@@ -137,6 +137,7 @@ client *createClient(connection *conn) {
     c->id = client_id;
     c->tid = IOTHREAD_MAIN_THREAD_ID;
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
+    c->free_obj_index = 0;
     if (conn) server.io_threads_clients_num[c->tid]++;
 #ifdef LOG_REQ_RES
     reqresReset(c, 0);
@@ -1476,6 +1477,13 @@ static inline void freeClientArgvInternal(client *c, int free_argv) {
     int j;
     for (j = 0; j < c->argc; j++)
         decrRefCount(c->argv[j]);
+
+    if (c->tid == IOTHREAD_MAIN_THREAD_ID) {
+        for (j = 0; j < c->free_obj_index; j++)
+            decrRefCount(c->free_objs[j]);
+        c->free_obj_index = 0;
+    }
+
     c->argc = 0;
     c->cmd = NULL;
     c->iolookedcmd = NULL;
@@ -1773,6 +1781,10 @@ void freeClient(client *c) {
     freeReplicaReferencedReplBuffer(c);
     freeClientArgv(c);
     freeClientOriginalArgv(c);
+    for (int i = 0; i < c->free_obj_index; i++) {
+        decrRefCount(c->free_objs[i]);
+    }
+    c->free_obj_index = 0;
     if (c->deferred_reply_errors)
         listRelease(c->deferred_reply_errors);
 #ifdef LOG_REQ_RES
