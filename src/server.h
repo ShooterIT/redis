@@ -1412,6 +1412,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
                                                  * than 256, we should also promote the data type. */
     pthread_t tid;                              /* Pthread ID */
     redisAtomic int paused;                     /* Paused status for the io thread. */
+    redisAtomic int running;                    /* Running status for the io thread. */
     aeEventLoop *el;                            /* Main event loop of io thread. */
     list *pending_clients;                      /* List of clients with pending writes. */
     list *processing_clients;                   /* List of clients being processed. */
@@ -2234,6 +2235,7 @@ struct redisServer {
     int reply_buffer_resizing_enabled; /* Is reply buffer resizing enabled (1 by default) */
     /* Local environment */
     char *locale_collate;
+    redisAtomic int running;
 };
 
 /* we use 6 so that all getKeyResult fits a cacheline */

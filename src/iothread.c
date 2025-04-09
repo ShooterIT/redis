@@ -30,13 +30,13 @@ void enqueuePendingClientsToMainThread(client *c, int unbind) {
     if (c->io_thread_client_list_node) {
         /* If there are several clients to process, let the main thread handle them ASAP. */
         if (listLength(IOThreads[c->tid].pending_clients_to_main_thread) >= 8) {
-            int has_pending = 0;
+            int running = 0;
             pthread_mutex_lock(&mainThreadPendingClientsMutexes[c->tid]);
-            has_pending = listLength(mainThreadPendingClients[c->tid]);
             listJoin(mainThreadPendingClients[c->tid],
                         IOThreads[c->tid].pending_clients_to_main_thread);
             pthread_mutex_unlock(&mainThreadPendingClientsMutexes[c->tid]);
-            if (!has_pending)
+            atomicGetWithSync(server.running, running);
+            if (!running)
                 triggerEventNotifier(mainThreadPendingClientsNotifiers[c->tid]);
         }
         listDelNode(IOThreads[c->tid].clients, c->io_thread_client_list_node);
@@ -364,8 +364,8 @@ void processClientsFromIOThread(IOThread *t) {
 
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
-            c->flags |= CLIENT_PENDING_COMMAND;
-            if (processPendingCommandAndInputBuffer(c) == C_ERR) {
+            c->flags &= ~CLIENT_PENDING_COMMAND;
+            if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, it must be freed safely. */
                 continue;
             }
@@ -411,10 +411,12 @@ void processClientsFromIOThread(IOThread *t) {
         server.aof_fsync != AOF_FSYNC_ALWAYS &&
         !ProcessingEventsWhileBlocked)
     {
+        int running = 0;
         pthread_mutex_lock(&(t->pending_clients_mutex));
         listJoin(t->pending_clients, mainThreadPendingClientsToIOThreads[t->id]);
         pthread_mutex_unlock(&(t->pending_clients_mutex));
-        triggerEventNotifier(t->pending_clients_notifier);
+        atomicGetWithSync(t->running, running);
+        if(!running) triggerEventNotifier(t->pending_clients_notifier);
     }
 }
 
@@ -452,7 +454,12 @@ void handleClientsFromIOThread(struct aeEventLoop *el, int fd, void *ptr, int ma
  * See also beforeSleep. */
 void processClientsOfAllIOThreads(void) {
     for (int i = 1; i < server.io_threads_num; i++) {
-        processClientsFromIOThread(&IOThreads[i]);
+        IOThread *t = &IOThreads[i];
+        pthread_mutex_lock(&mainThreadPendingClientsMutexes[t->id]);
+        listJoin(mainThreadProcessingClients[t->id], mainThreadPendingClients[t->id]);
+        pthread_mutex_unlock(&mainThreadPendingClientsMutexes[t->id]);
+        if (listLength(mainThreadProcessingClients[t->id]) == 0) continue;
+        processClientsFromIOThread(t);
     }
 }
 
@@ -472,10 +479,15 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     serverAssert(fd == getReadEventFd(t->pending_clients_notifier));
     handleEventNotifier(t->pending_clients_notifier);
 
+    // pthread_mutex_lock(&t->pending_clients_mutex);
+    // listJoin(t->processing_clients, t->pending_clients);
+    // pthread_mutex_unlock(&t->pending_clients_mutex);
+}
+
+void processClientsFromMainThread(IOThread *t) {
     pthread_mutex_lock(&t->pending_clients_mutex);
     listJoin(t->processing_clients, t->pending_clients);
     pthread_mutex_unlock(&t->pending_clients_mutex);
-    if (listLength(t->processing_clients) == 0) return;
 
     listIter li;
     listNode *ln;
@@ -515,8 +527,12 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
             connSetReadHandler(c->conn, readQueryFromClient);
         }
 
+        if (c->querybuf && sdslen(c->querybuf) > 0) {
+            processInputBuffer(c);
+        }
+
         /* If the client has pending replies, write replies to client. */
-        if (clientHasPendingReplies(c)) {
+        if ((c->io_flags & CLIENT_IO_WRITE_ENABLED) && clientHasPendingReplies(c)) {
             writeToClient(c, 0);
             if (!(c->io_flags & CLIENT_IO_CLOSE_ASAP) && clientHasPendingReplies(c)) {
                 connSetWriteHandler(c->conn, sendReplyToClient);
@@ -538,6 +554,11 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
     /* Check if i am being paused, pause myself and resume. */
     handlePauseAndResume(t);
 
+
+    processClientsFromMainThread(t);
+    atomicSetWithSync(t->running, 0);
+    processClientsFromMainThread(t);
+    
     /* Check if there are clients to be processed in main thread, and then join
      * them to the list of main thread. */
     if (listLength(t->pending_clients_to_main_thread) > 0) {
@@ -547,8 +568,17 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
         /* Trigger an event, maybe an error is returned when buffer is full
          * if using pipe, but no worry, main thread will handle all clients
          * in list when receiving a notification. */
-        triggerEventNotifier(mainThreadPendingClientsNotifiers[t->id]);
+        int running = 0;
+        atomicGetWithSync(server.running, running);
+        if (!running)
+            triggerEventNotifier(mainThreadPendingClientsNotifiers[t->id]);
     }
+}
+
+void IOThreadAfterSleep(struct aeEventLoop *el) {
+    IOThread *t = el->privdata[0];
+
+    atomicSetWithSync(t->running, 1);
 }
 
 /* The main function of IO thread, it will run an event loop. The mian thread
@@ -561,6 +591,7 @@ void *IOThreadMain(void *ptr) {
     redisSetCpuAffinity(server.server_cpulist);
     makeThreadKillable();
     aeSetBeforeSleepProc(t->el, IOThreadBeforeSleep);
+    aeSetAfterSleepProc(t->el, IOThreadAfterSleep);
     aeMain(t->el);
     return NULL;
 }
