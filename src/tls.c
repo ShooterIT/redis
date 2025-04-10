@@ -636,7 +636,7 @@ static void tlsHandleEvent(tls_connection *conn, int mask) {
             conn->c.fd, conn->c.state, mask, conn->c.read_handler != NULL, conn->c.write_handler != NULL,
             conn->flags);
 
-    ERR_clear_error();
+    //ERR_clear_error();
 
     switch (conn->c.state) {
         case CONN_STATE_CONNECTING:

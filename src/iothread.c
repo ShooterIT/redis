@@ -29,7 +29,7 @@ void enqueuePendingClientsToMainThread(client *c, int unbind) {
     /* Just skip if it already is transferred. */
     if (c->io_thread_client_list_node) {
         /* If there are several clients to process, let the main thread handle them ASAP. */
-        if (listLength(IOThreads[c->tid].pending_clients_to_main_thread) >= 8) {
+        if (listLength(IOThreads[c->tid].pending_clients_to_main_thread) >= 16) {
             int has_pending = 0;
             pthread_mutex_lock(&mainThreadPendingClientsMutexes[c->tid]);
             has_pending = listLength(mainThreadPendingClients[c->tid]);
@@ -364,8 +364,7 @@ void processClientsFromIOThread(IOThread *t) {
 
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
-            c->flags |= CLIENT_PENDING_COMMAND;
-            if (processPendingCommandAndInputBuffer(c) == C_ERR) {
+            if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, it must be freed safely. */
                 continue;
             }
@@ -515,8 +514,12 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
             connSetReadHandler(c->conn, readQueryFromClient);
         }
 
+        if (c->querybuf && sdslen(c->querybuf) > 0) {
+            processInputBuffer(c);
+        }
+
         /* If the client has pending replies, write replies to client. */
-        if (clientHasPendingReplies(c)) {
+        if ((c->io_flags & CLIENT_IO_WRITE_ENABLED) && clientHasPendingReplies(c)) {
             writeToClient(c, 0);
             if (!(c->io_flags & CLIENT_IO_CLOSE_ASAP) && clientHasPendingReplies(c)) {
                 connSetWriteHandler(c->conn, sendReplyToClient);
