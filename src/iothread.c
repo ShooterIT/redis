@@ -537,7 +537,7 @@ void processClientsFromMainThread(IOThread *t) {
             c->pipeline_clients_node.next != NULL &&
             c->pipeline_clients_node.prev != NULL)
         {
-            listUnlinkNode(t->pending_clients, &c->clients_pending_write_node);
+            listUnlinkNode(t->pending_clients, &c->pipeline_clients_node);
         }
 
         /* Only bind once, we never remove read handler unless freeing client. */
