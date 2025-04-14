@@ -1475,13 +1475,21 @@ void freeClientOriginalArgv(client *c) {
 
 static inline void freeClientArgvInternal(client *c, int free_argv) {
     int j;
-    for (j = 0; j < c->argc; j++)
-        decrRefCount(c->argv[j]);
 
     if (c->tid == IOTHREAD_MAIN_THREAD_ID) {
+        for (j = 0; j < c->argc; j++)
+            decrRefCount(c->argv[j]);
         for (j = 0; j < c->free_obj_index; j++)
             decrRefCount(c->free_objs[j]);
         c->free_obj_index = 0;
+    } else {
+        for (j = 0; j < c->argc; j++) {
+            if (c->argv[j]->refcount == 1 && c->free_obj_index < CLIENT_FREE_OBJS_MAX) {
+                c->free_objs[c->free_obj_index++] = c->argv[j];
+            } else {
+                decrRefCount(c->argv[j]);
+            }
+        }
     }
 
     c->argc = 0;
@@ -2896,7 +2904,10 @@ void readQueryFromClient(connection *conn) {
     client *c = connGetPrivateData(conn);
     int nread, big_arg = 0;
     size_t qblen, readlen;
-    if (!(c->io_flags & CLIENT_IO_READ_ENABLED)) return;
+    if (!(c->io_flags & CLIENT_IO_READ_ENABLED)) {
+        connSetReadHandler(conn, NULL);
+        return;
+    }
     c->read_error = 0;
 
     /* Update the number of reads of io threads on server */
