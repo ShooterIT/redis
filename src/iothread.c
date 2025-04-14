@@ -638,6 +638,7 @@ void initThreadedIO(void) {
         t->processing_clients = listCreate();
         t->pending_clients_to_main_thread = listCreate();
         t->clients = listCreate();
+        t->pipeline_clients = listCreate();
         atomicSetWithSync(t->paused, IO_THREAD_UNPAUSED);
 
         pthread_mutexattr_t *attr = NULL;
