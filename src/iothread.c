@@ -525,6 +525,19 @@ void processClientsFromMainThread(IOThread *t) {
 
         if (c->querybuf && sdslen(c->querybuf) > 0) {
             processInputBuffer(c);
+            if ((c->io_flags & CLIENT_IO_PENDING_COMMAND) &&
+                c->pipeline_clients_node.next == NULL &&
+                c->pipeline_clients_node.prev == NULL)
+            {
+                listLinkNodeTail(t->pending_clients, &c->pipeline_clients_node);
+            }
+        }
+
+        if (!(c->io_flags & CLIENT_IO_PENDING_COMMAND) &&
+            c->pipeline_clients_node.next != NULL &&
+            c->pipeline_clients_node.prev != NULL)
+        {
+            listUnlinkNode(t->pending_clients, &c->clients_pending_write_node);
         }
 
         /* Only bind once, we never remove read handler unless freeing client. */

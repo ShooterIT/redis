@@ -218,6 +218,7 @@ client *createClient(connection *conn) {
     c->auth_callback_privdata = NULL;
     c->auth_module = NULL;
     listInitNode(&c->clients_pending_write_node, c);
+    listInitNode(&c->pipeline_clients_node, c);
     c->mem_usage_bucket = NULL;
     c->mem_usage_bucket_node = NULL;
     if (conn) linkClient(c);
