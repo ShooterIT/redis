@@ -575,7 +575,9 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
 
     atomicSetWithSync(t->handle_without_notify, 0);
     processClientsFromMainThread(t);
-    
+
+    aeSetDontWait(el, listLength(t->pending_clients));
+
     /* Check if there are clients to be processed in main thread, and then join
      * them to the list of main thread. */
     if (listLength(t->pending_clients_to_main_thread) > 0) {
