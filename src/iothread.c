@@ -529,7 +529,7 @@ void processClientsFromMainThread(IOThread *t) {
                 c->pipeline_clients_node.next == NULL &&
                 c->pipeline_clients_node.prev == NULL)
             {
-                listLinkNodeTail(t->pending_clients, &c->pipeline_clients_node);
+                listLinkNodeTail(t->pipeline_clients, &c->pipeline_clients_node);
             }
         }
 
@@ -537,7 +537,7 @@ void processClientsFromMainThread(IOThread *t) {
             c->pipeline_clients_node.next != NULL &&
             c->pipeline_clients_node.prev != NULL)
         {
-            listUnlinkNode(t->pending_clients, &c->pipeline_clients_node);
+            listUnlinkNode(t->pipeline_clients, &c->pipeline_clients_node);
         }
 
         /* Only bind once, we never remove read handler unless freeing client. */
@@ -576,7 +576,7 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
     atomicSetWithSync(t->handle_without_notify, 0);
     processClientsFromMainThread(t);
 
-    aeSetDontWait(el, listLength(t->pending_clients));
+    aeSetDontWait(el, listLength(t->pipeline_clients));
 
     /* Check if there are clients to be processed in main thread, and then join
      * them to the list of main thread. */
