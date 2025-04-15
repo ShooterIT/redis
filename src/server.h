@@ -1412,6 +1412,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
                                                  * than 256, we should also promote the data type. */
     pthread_t tid;                              /* Pthread ID */
     redisAtomic int paused;                     /* Paused status for the io thread. */
+    redisAtomic int running;                    /* Running status for the io thread. */
     aeEventLoop *el;                            /* Main event loop of io thread. */
     list *pending_clients;                      /* List of clients with pending writes. */
     list *processing_clients;                   /* List of clients being processed. */
@@ -1732,6 +1733,7 @@ struct redisServer {
     int client_pause_in_transaction; /* Was a client pause executed during this Exec? */
     int thp_enabled;                 /* If true, THP is enabled. */
     size_t page_size;                /* The page size of OS. */
+    redisAtomic int running;    /* Server main thread is running if true */
     /* Modules */
     dict *moduleapi;            /* Exported core APIs dictionary for modules. */
     dict *sharedapi;            /* Like moduleapi but containing the APIs that
@@ -2862,7 +2864,7 @@ void enqueuePendingClientsToMainThread(client *c, int unbind);
 void putInPendingClienstForIOThreads(client *c);
 void handleClientReadError(client *c);
 void unbindClientFromIOThreadEventLoop(client *c);
-void processClientsOfAllIOThreads(void);
+int processClientsOfAllIOThreads(void);
 void assignClientToIOThread(client *c);
 void fetchClientFromIOThread(client *c);
 int isClientMustHandledByMainThread(client *c);
