@@ -408,6 +408,7 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_IO_PENDING_COMMAND (1ULL<<2) /* Similar to CLIENT_PENDING_COMMAND. */
 #define CLIENT_IO_REUSABLE_QUERYBUFFER (1ULL<<3) /* The client is using the reusable query buffer. */
 #define CLIENT_IO_CLOSE_ASAP (1ULL<<4) /* Close this client ASAP in IO thread. */
+#define CLIENT_IO_PIPELINE (1ULL<<5) /* Client is in pipeline mode. */
 
 /* Definitions for client read errors. These error codes are used to indicate
  * various issues that can occur while reading or parsing data from a client. */
@@ -1411,6 +1412,7 @@ typedef struct __attribute__((aligned(CACHE_LINE_SIZE))) {
     uint8_t id;                                 /* The unique ID assigned, if IO_THREADS_MAX_NUM is more
                                                  * than 256, we should also promote the data type. */
     pthread_t tid;                              /* Pthread ID */
+    int busy_mode;                              /* Busy mode for the io thread, do not sleep. */
     redisAtomic int paused;                     /* Paused status for the io thread. */
     redisAtomic int running;                    /* Running status for the io thread. */
     aeEventLoop *el;                            /* Main event loop of io thread. */
@@ -1733,6 +1735,7 @@ struct redisServer {
     int client_pause_in_transaction; /* Was a client pause executed during this Exec? */
     int thp_enabled;                 /* If true, THP is enabled. */
     size_t page_size;                /* The page size of OS. */
+    int busy_mode;              /* If true, we are in busy mode, do not sleep. */
     redisAtomic int running;    /* Server main thread is running if true */
     /* Modules */
     dict *moduleapi;            /* Exported core APIs dictionary for modules. */

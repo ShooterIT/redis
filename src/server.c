@@ -1836,6 +1836,9 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     atomicSetWithSync(server.running, 0);
     if (processClientsOfAllIOThreads() > 0) dont_sleep = 1;
 
+    if (server.busy_mode) dont_sleep = 1;
+    server.busy_mode = 0;
+
     /* Let io thread to handle its pending clients. */
     sendPendingClientsToIOThreads();
 
@@ -2836,6 +2839,7 @@ void initServer(void) {
     server.repl_good_slaves_count = 0;
     server.last_sig_received = 0;
     memset(server.io_threads_clients_num, 0, sizeof(server.io_threads_clients_num));
+    server.busy_mode = 0;
     atomicSetWithSync(server.running, 0);
 
     /* Initiate acl info struct */

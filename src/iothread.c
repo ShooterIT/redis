@@ -402,6 +402,9 @@ void processClientsFromIOThread(IOThread *t) {
 
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
+            if (c->io_flags & CLIENT_IO_PIPELINE) {
+                server.busy_mode = 1;
+            }
             if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, it must be freed safely. */
                 continue;
@@ -513,8 +516,8 @@ int processClientsFromMainThread(IOThread *t) {
     pthread_mutex_lock(&t->pending_clients_mutex);
     listJoin(t->processing_clients, t->pending_clients);
     pthread_mutex_unlock(&t->pending_clients_mutex);
-    size_t len = listLength(t->processing_clients);
-    if (len == 0) return 0;
+    size_t processed = listLength(t->processing_clients);
+    if (processed == 0) return 0;
 
     listIter li;
     listNode *ln;
@@ -546,6 +549,7 @@ int processClientsFromMainThread(IOThread *t) {
         /* Enable read and write and reset some flags. */
         c->io_flags |= CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED;
         c->io_flags &= ~CLIENT_IO_PENDING_COMMAND;
+        c->io_flags &= ~CLIENT_IO_PIPELINE;
 
         /* Only bind once, we never remove read handler unless freeing client. */
         if (!connHasEventLoop(c->conn)) {
@@ -554,6 +558,10 @@ int processClientsFromMainThread(IOThread *t) {
 
         if (c->querybuf && sdslen(c->querybuf) > 0) {
             processInputBuffer(c);
+            if (c->io_flags & CLIENT_IO_PENDING_COMMAND) {
+                c->io_flags |= CLIENT_IO_PIPELINE;
+                t->busy_mode = 1;
+            }
         }
 
         if ((c->io_flags & CLIENT_IO_READ_ENABLED) && !connHasReadHandler(c->conn)) {
@@ -569,7 +577,7 @@ int processClientsFromMainThread(IOThread *t) {
         }
     }
     listEmpty(t->processing_clients);
-    return len;
+    return processed;
 }
 
 void IOThreadBeforeSleep(struct aeEventLoop *el) {
@@ -584,6 +592,10 @@ void IOThreadBeforeSleep(struct aeEventLoop *el) {
     atomicSetWithSync(t->running, 0);
 
     if (processClientsFromMainThread(t) > 0) dont_sleep = 1;
+
+    /* If the IO thread is busy, we should not sleep. */
+    if (t->busy_mode) dont_sleep = 1;
+    t->busy_mode = 0; /* Reset busy mode. */
 
     aeSetDontWait(t->el, dont_sleep);
 
@@ -630,6 +642,7 @@ void initThreadedIO(void) {
     for (int i = 1; i < server.io_threads_num; i++) {
         IOThread *t = &IOThreads[i];
         t->id = i;
+        t->busy_mode = 0;
         t->el = aeCreateEventLoop(server.maxclients+CONFIG_FDSET_INCR);
         t->el->privdata[0] = t;
         t->pending_clients = listCreate();
