@@ -368,8 +368,14 @@ void sendPendingClientsToIOThreadIfNeeded(IOThread *t, int size_check) {
  * when processing script command, it may call processEventsWhileBlocked to
  * process new events, if the clients with fired events from the same io thread,
  * it may call this function reentrantly. */
-void processClientsFromIOThread(IOThread *t) {
+int processClientsFromIOThread(IOThread *t) {
     listNode *node = NULL;
+    /* Get the list of clients to process. */
+    pthread_mutex_lock(&mainThreadPendingClientsMutexes[t->id]);
+    listJoin(mainThreadProcessingClients[t->id], mainThreadPendingClients[t->id]);
+    pthread_mutex_unlock(&mainThreadPendingClientsMutexes[t->id]);
+    size_t processed = listLength(mainThreadProcessingClients[t->id]);
+    if (processed == 0) return 0;
 
     while (listLength(mainThreadProcessingClients[t->id])) {
         /* Each time we pop up only the first client to process to guarantee
@@ -440,6 +446,7 @@ void processClientsFromIOThread(IOThread *t) {
     if (node) zfree(node);
 
     sendPendingClientsToIOThreadIfNeeded(t, 0);
+    return processed;
 }
 
 /* When the io thread finishes processing the client with the read event, it will
@@ -455,14 +462,10 @@ void handleClientsFromIOThread(struct aeEventLoop *el, int fd, void *ptr, int ma
     serverAssert(fd == getReadEventFd(mainThreadPendingClientsNotifiers[t->id]));
     handleEventNotifier(mainThreadPendingClientsNotifiers[t->id]);
 
-    /* Get the list of clients to process. */
-    pthread_mutex_lock(&mainThreadPendingClientsMutexes[t->id]);
-    listJoin(mainThreadProcessingClients[t->id], mainThreadPendingClients[t->id]);
-    pthread_mutex_unlock(&mainThreadPendingClientsMutexes[t->id]);
-    if (listLength(mainThreadProcessingClients[t->id]) == 0) return;
-
     /* Process the clients from IO threads. */
-    processClientsFromIOThread(t);
+    while (processClientsFromIOThread(t)) {
+        /* Do nothing, just process the clients. */
+    }
 }
 
 /* In the new threaded io design, one thread may process multiple clients, so when
@@ -478,16 +481,7 @@ int processClientsOfAllIOThreads(void) {
     int processed = 0;
     for (int i = 1; i < server.io_threads_num; i++) {
         IOThread *t = &IOThreads[i];
-        pthread_mutex_lock(&mainThreadPendingClientsMutexes[t->id]);
-        listJoin(mainThreadProcessingClients[t->id], mainThreadPendingClients[t->id]);
-        pthread_mutex_unlock(&mainThreadPendingClientsMutexes[t->id]);
-        size_t len = listLength(mainThreadProcessingClients[t->id]);
-        if (len == 0) {
-            continue;
-        } else {
-            processClientsFromIOThread(t);
-            processed += len;
-        }
+        processed += processClientsFromIOThread(t);
     }
     return processed;
 }
@@ -509,7 +503,9 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
     serverAssert(fd == getReadEventFd(t->pending_clients_notifier));
     handleEventNotifier(t->pending_clients_notifier);
 
-    processClientsFromMainThread(t);
+    while (processClientsFromMainThread(t)) {
+        /* Do nothing, just process the clients. */
+    }
 }
 
 int processClientsFromMainThread(IOThread *t) {
