@@ -410,10 +410,12 @@ void processClientsFromIOThread(IOThread *t) {
         server.aof_fsync != AOF_FSYNC_ALWAYS &&
         !ProcessingEventsWhileBlocked)
     {
+        int has_pending = 0;
         pthread_mutex_lock(&(t->pending_clients_mutex));
+        has_pending = listLength(t->pending_clients);
         listJoin(t->pending_clients, mainThreadPendingClientsToIOThreads[t->id]);
         pthread_mutex_unlock(&(t->pending_clients_mutex));
-        triggerEventNotifier(t->pending_clients_notifier);
+        if (!has_pending) triggerEventNotifier(t->pending_clients_notifier);
     }
 }
 
@@ -428,7 +430,7 @@ void handleClientsFromIOThread(struct aeEventLoop *el, int fd, void *ptr, int ma
 
     /* Handle fd event first. */
     serverAssert(fd == getReadEventFd(mainThreadPendingClientsNotifiers[t->id]));
-    handleEventNotifier(mainThreadPendingClientsNotifiers[t->id]);
+    while (handleEventNotifier(mainThreadPendingClientsNotifiers[t->id]) != EN_OK) {
 
     /* Get the list of clients to process. */
     pthread_mutex_lock(&mainThreadPendingClientsMutexes[t->id]);
@@ -438,6 +440,7 @@ void handleClientsFromIOThread(struct aeEventLoop *el, int fd, void *ptr, int ma
 
     /* Process the clients from IO threads. */
     processClientsFromIOThread(t);
+    }
 }
 
 /* In the new threaded io design, one thread may process multiple clients, so when
@@ -469,7 +472,9 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
 
     /* Handle fd event first. */
     serverAssert(fd == getReadEventFd(t->pending_clients_notifier));
-    handleEventNotifier(t->pending_clients_notifier);
+    while (handleEventNotifier(t->pending_clients_notifier) == EN_OK) {
+        /* Do nothing */
+    
 
     pthread_mutex_lock(&t->pending_clients_mutex);
     listJoin(t->processing_clients, t->pending_clients);
@@ -527,6 +532,7 @@ void handleClientsFromMainThread(struct aeEventLoop *ae, int fd, void *ptr, int 
         }
     }
     listEmpty(t->processing_clients);
+    }
 }
 
 void IOThreadBeforeSleep(struct aeEventLoop *el) {
