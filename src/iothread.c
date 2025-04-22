@@ -419,9 +419,14 @@ int processClientsFromIOThread(IOThread *t) {
 
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
-            if (processCommandAndResetClient(c) == C_ERR) {
-                /* If the client is no longer valid, it must be freed safely. */
-                continue;
+            // printf("process pending command number %d\n", c->pending_cmds_count);
+            for (int i = 0; i < c->pending_cmds_count; i++) {
+                c->argc = c->pending_cmds[i].argc;
+                c->argv = c->pending_cmds[i].argv;
+                c->argv_len = c->pending_cmds[i].argv_len;
+                c->argv_len_sum = c->pending_cmds[i].argv_len_sum;
+                c->iolookedcmd = c->pending_cmds[i].cmd;
+                serverAssert(processCommandAndResetClient(c) == C_OK);
             }
         }
 
@@ -546,6 +551,10 @@ int processClientsFromMainThread(IOThread *t) {
 
         /* Free deferred objects now. */
         freeDeferredObjects(c, 0);
+        for (int i = 0; i < c->pending_cmds_count; i++) {
+            zfree(c->pending_cmds[i].argv);
+        }
+        c->pending_cmds_count = 0;
 
         /* The client is asked to close, we just let main thread free it. */
         if (c->io_flags & CLIENT_IO_CLOSE_ASAP) {
