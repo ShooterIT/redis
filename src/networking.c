@@ -159,6 +159,14 @@ client *createClient(connection *conn) {
     c->querybuf = NULL;
     c->querybuf_peak = 0;
     c->reqtype = 0;
+
+    c->argc_parsing = 0;
+    c->argv_parsing = NULL;
+    c->argv_len_parsing = 0;
+    c->argv_len_sum_parsing = 0;
+    c->cmds = listCreate();
+    listSetFreeMethod(c->cmds, zfree);
+
     c->argc = 0;
     c->argv = NULL;
     c->argv_len = 0;
@@ -1517,11 +1525,13 @@ static inline void freeClientArgvInternal(client *c, int free_argv) {
     c->cmd = NULL;
     c->iolookedcmd = NULL;
     c->argv_len_sum = 0;
-    if (free_argv) {
-        c->argv_len = 0;
-        zfree(c->argv);
-        c->argv = NULL;
-    }
+    c->argv_len = 0;
+    c->argv = NULL;
+    // if (free_argv) {
+    //     c->argv_len = 0;
+    //     zfree(c->argv);
+    //     c->argv = NULL;
+    // }
 }
 
 void freeClientArgv(client *c) {
@@ -2273,9 +2283,9 @@ static inline void resetClientInternal(client *c, int free_argv) {
 
     freeClientArgvInternal(c, free_argv);
     c->cur_script = NULL;
-    c->reqtype = 0;
-    c->multibulklen = 0;
-    c->bulklen = -1;
+    // c->reqtype = 0;
+    // c->multibulklen = 0;
+    // c->bulklen = -1;
     c->slot = -1;
     c->cluster_compatibility_check_slot = -2;
     c->flags &= ~CLIENT_EXECUTING_COMMAND;
@@ -2482,7 +2492,7 @@ int processMultibulkBuffer(client *c) {
 
     if (c->multibulklen == 0) {
         /* The client should have been reset */
-        serverAssertWithInfo(c,NULL,c->argc == 0);
+        serverAssertWithInfo(c,NULL,c->argc_parsing == 0);
 
         /* Multi bulk length cannot be read without a \r\n */
         newline = strchr(c->querybuf+c->qb_pos,'\r');
@@ -2521,12 +2531,12 @@ int processMultibulkBuffer(client *c) {
          * 2) When the requested size is less than the current size, because
          *    we always allocate argv gradually with a maximum size of 1024,
          *    Therefore, if argv_len exceeds this limit, we always reallocate. */
-        if (unlikely(c->multibulklen > c->argv_len || c->argv_len > 1024)) {
-            zfree(c->argv);
-            c->argv_len = min(c->multibulklen, 1024);
-            c->argv = zmalloc(sizeof(robj*)*c->argv_len);
+        if (unlikely(c->multibulklen > c->argv_len_parsing || c->argv_len_parsing > 1024)) {
+            zfree(c->argv_parsing);
+            c->argv_len_parsing = min(c->multibulklen, 1024);
+            c->argv_parsing = zmalloc(sizeof(robj*)*c->argv_len_parsing);
         }
-        c->argv_len_sum = 0;
+        c->argv_len_sum_parsing = 0;
     }
 
     serverAssertWithInfo(c,NULL,c->multibulklen > 0);
@@ -2597,10 +2607,9 @@ int processMultibulkBuffer(client *c) {
             break;
         } else {
             /* Check if we have space in argv, grow if needed */
-            if (c->argc >= c->argv_len) {
-                serverAssert(c->argv_len); /* Ensure argv is not freed while the client is in the mid of parsing command. */
-                c->argv_len = min(c->argv_len < INT_MAX/2 ? c->argv_len*2 : INT_MAX, c->argc+c->multibulklen);
-                c->argv = zrealloc(c->argv, sizeof(robj*)*c->argv_len);
+            if (c->argc_parsing >= c->argv_len_parsing) {
+                c->argv_len_parsing = min(c->argv_len_parsing < INT_MAX/2 ? c->argv_len_parsing*2 : INT_MAX, c->argc_parsing+c->multibulklen);
+                c->argv_parsing = zrealloc(c->argv_parsing, sizeof(robj*)*c->argv_len_parsing);
             }
 
             /* Optimization: if a non-master client's buffer contains JUST our bulk element
@@ -2611,8 +2620,8 @@ int processMultibulkBuffer(client *c) {
                 c->bulklen >= PROTO_MBULK_BIG_ARG &&
                 querybuf_len == (size_t)(c->bulklen+2))
             {
-                c->argv[c->argc++] = createObject(OBJ_STRING,c->querybuf);
-                c->argv_len_sum += c->bulklen;
+                c->argv_parsing[c->argc_parsing++] = createObject(OBJ_STRING,c->querybuf);
+                c->argv_len_sum_parsing += c->bulklen;
                 sdsIncrLen(c->querybuf,-2); /* remove CRLF */
                 /* Assume that if we saw a fat argument we'll see another one
                  * likely... */
@@ -2620,9 +2629,9 @@ int processMultibulkBuffer(client *c) {
                 sdsclear(c->querybuf);
                 querybuf_len = sdslen(c->querybuf); /* Update cached length */
             } else {
-                c->argv[c->argc++] =
+                c->argv_parsing[c->argc_parsing++] =
                     createStringObject(c->querybuf+c->qb_pos,c->bulklen);
-                c->argv_len_sum += c->bulklen;
+                c->argv_len_sum_parsing += c->bulklen;
                 c->qb_pos += c->bulklen+2;
             }
             c->bulklen = -1;
@@ -2859,8 +2868,14 @@ int processInputBuffer(client *c) {
         }
 
         /* Multibulk processing could see a <= 0 length. */
-        if (c->argc == 0) {
-            freeClientArgvInternal(c, 0);
+        if (c->argc_parsing == 0) {
+            for (int j = 0; j < c->argc_parsing; j++)
+                decrRefCount(c->argv_parsing[j]);
+            c->argc_parsing = 0;
+            c->argv_len_sum_parsing = 0;
+            c->argv_len_parsing = 0;
+            zfree(c->argv_parsing);
+
             c->reqtype = 0;
             c->multibulklen = 0;
             c->bulklen = -1;
@@ -2869,19 +2884,37 @@ int processInputBuffer(client *c) {
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                c->io_flags |= CLIENT_IO_PENDING_COMMAND;
-                c->iolookedcmd = lookupCommand(c->argv, c->argc);
-                enqueuePendingClientsToMainThread(c, 0);
-                break;
+                ClientCommand *cmd = zmalloc(sizeof(ClientCommand));
+                cmd->argc = c->argc_parsing;
+                cmd->argv = c->argv_parsing;
+                cmd->argv_len = c->argv_len_parsing;
+                cmd->argv_len_sum = c->argv_len_sum_parsing;
+                cmd->cmd = lookupCommand(cmd->argv, cmd->argc);
+                listAddNodeTail(c->cmds, cmd);
+
+                c->argc_parsing = 0;
+                c->argv_parsing = NULL;
+                c->argv_len_parsing = 0;
+                c->argv_len_sum_parsing = 0;
+
+                c->reqtype = 0;
+                c->multibulklen = 0;
+                c->bulklen = -1;
             }
 
-            /* We are finally ready to execute the command. */
-            if (processCommandAndResetClient(c) == C_ERR) {
-                /* If the client is no longer valid, we avoid exiting this
-                 * loop and trimming the client buffer later. So we return
-                 * ASAP in that case. */
-                return C_ERR;
-            }
+            // /* We are finally ready to execute the command. */
+            // if (processCommandAndResetClient(c) == C_ERR) {
+            //     /* If the client is no longer valid, we avoid exiting this
+            //      * loop and trimming the client buffer later. So we return
+            //      * ASAP in that case. */
+            //     return C_ERR;
+            // }
+        }
+    }
+    if (listLength(c->cmds)) {
+        if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+            c->io_flags |= CLIENT_IO_PENDING_COMMAND;
+            enqueuePendingClientsToMainThread(c, 0);
         }
     }
 

@@ -1275,6 +1275,15 @@ typedef struct {
 } clientReqResInfo;
 #endif
 
+
+typedef struct ClientCommand {
+    struct redisCommand *cmd;
+    int argc;               /* Num of arguments of current command. */
+    robj **argv;            /* Arguments of current command. */
+    int argv_len;           /* Size of argv array (may be more than argc) */
+    size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
+} ClientCommand;
+
 typedef struct client {
     uint64_t id;            /* Client incremental unique ID. */
     uint64_t flags;         /* Client flags: CLIENT_* macros. */
@@ -1299,6 +1308,11 @@ typedef struct client {
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
     robj **deferred_objects;    /* List of deferred objects to free. */
     int deferred_objects_num; /* Number of deferred objects to free. */
+    list *cmds; /* List of pending commands to execute. */
+    int argc_parsing;
+    robj **argv_parsing;
+    int argv_len_parsing;
+    size_t argv_len_sum_parsing;
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
     struct redisCommand *iolookedcmd;    /* Command looked up in IO threads. */
     struct redisCommand *realcmd; /* The original command that was executed by the client,

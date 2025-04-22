@@ -419,9 +419,21 @@ int processClientsFromIOThread(IOThread *t) {
 
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
-            if (processCommandAndResetClient(c) == C_ERR) {
-                /* If the client is no longer valid, it must be freed safely. */
-                continue;
+            listIter li;
+            listNode *ln;
+            ClientCommand *cmd;
+            listRewind(c->cmds, &li);
+            while ((ln = listNext(&li))) {
+                cmd = listNodeValue(ln);
+                c->argc = cmd->argc;
+                c->argv = cmd->argv;
+                c->argv_len = cmd->argv_len;
+                c->argv_len_sum = cmd->argv_len_sum;
+                c->iolookedcmd = cmd->cmd;
+ 
+                if (processCommandAndResetClient(c) == C_ERR) {
+                    continue;
+                }
             }
         }
 
@@ -546,6 +558,15 @@ int processClientsFromMainThread(IOThread *t) {
 
         /* Free deferred objects now. */
         freeDeferredObjects(c, 0);
+        listIter li;
+        listNode *ln;
+        ClientCommand *cmd;
+        listRewind(c->cmds, &li);
+        while ((ln = listNext(&li))) {
+            cmd = listNodeValue(ln);
+            zfree(cmd->argv);
+        }
+        listEmpty(c->cmds);
 
         /* The client is asked to close, we just let main thread free it. */
         if (c->io_flags & CLIENT_IO_CLOSE_ASAP) {
