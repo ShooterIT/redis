@@ -338,8 +338,11 @@ void prefetchCommands(void) {
         if (!c) continue;
         /* Skip prefetching first argv (cmd name) it was already looked up by
          * the I/O thread. */
-        for (int i = 0; i < c->pending_cmds_count; i++) {
-            ClientCommand *cmd = &c->pending_cmds[i]; 
+         listIter li;
+         listNode *ln;
+         listRewind(c->cmds, &li);
+         while ((ln = listNext(&li))) {
+             ClientCommand *cmd = listNodeValue(ln);
             for (int j = 1; j < cmd->argc; j++) {
                 redis_prefetch(cmd->argv[j]);
             }
@@ -350,8 +353,11 @@ void prefetchCommands(void) {
     for (size_t i = 0; i < batch->client_count; i++) {
         client *c = batch->clients[i];
         if (!c) continue;
-        for (int i = 0; i < c->pending_cmds_count; i++) {
-            ClientCommand *cmd = &c->pending_cmds[i]; 
+        listIter li;
+        listNode *ln;
+        listRewind(c->cmds, &li);
+        while ((ln = listNext(&li))) {
+            ClientCommand *cmd = listNodeValue(ln);
             for (int j = 1; j < cmd->argc; j++) {
                 if (cmd->argv[j]->encoding == OBJ_ENCODING_RAW) {
                     redis_prefetch(cmd->argv[j]->ptr);
@@ -391,8 +397,11 @@ int addCommandToBatch(client *c) {
 
     batch->clients[batch->client_count++] = c;
 
-    for (int i = 0; i < c->pending_cmds_count; i++) {
-        ClientCommand *cmd = &c->pending_cmds[i];
+    listIter li;
+    listNode *ln;
+    listRewind(c->cmds, &li);
+    while ((ln = listNext(&li))) {
+        ClientCommand *cmd = listNodeValue(ln);
         if (cmd->cmd) {
             /* Get command's keys positions */
             getKeysResult result = GETKEYS_RESULT_INIT;

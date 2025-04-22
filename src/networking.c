@@ -165,7 +165,8 @@ client *createClient(connection *conn) {
     c->argv_parsing = NULL;
     c->argv_len_parsing = 0;
     c->argv_len_sum_parsing = 0;
-    c->pending_cmds_count = 0;
+    c->cmds = listCreate();
+    listSetFreeMethod(c->cmds, zfree);
 
     c->argc = 0;
     c->argv = NULL;
@@ -1528,6 +1529,8 @@ static inline void freeClientArgvInternal(client *c, int free_argv) {
     c->cmd = NULL;
     c->iolookedcmd = NULL;
     c->argv_len_sum = 0;
+    c->argv_len = 0;
+    c->argv = NULL;
     // if (free_argv) {
     //     c->argv_len = 0;
     //     zfree(c->argv);
@@ -2285,9 +2288,9 @@ static inline void resetClientInternal(client *c, int free_argv) {
 
     freeClientArgvInternal(c, free_argv);
     c->cur_script = NULL;
-    c->reqtype = 0;
-    c->multibulklen = 0;
-    c->bulklen = -1;
+    // c->reqtype = 0;
+    // c->multibulklen = 0;
+    // c->bulklen = -1;
     c->slot = -1;
     c->cluster_compatibility_check_slot = -2;
     c->flags &= ~CLIENT_EXECUTING_COMMAND;
@@ -2886,32 +2889,38 @@ int processInputBuffer(client *c) {
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                c->io_flags |= CLIENT_IO_PENDING_COMMAND;
-                // c->iolookedcmd = lookupCommand(c->argv, c->argc);
-                ClientCommand *cmd = &c->pending_cmds[c->pending_cmds_count++];
+                ClientCommand *cmd = zmalloc(sizeof(ClientCommand));
                 cmd->argc = c->argc_parsing;
                 cmd->argv = c->argv_parsing;
                 cmd->argv_len = c->argv_len_parsing;
                 cmd->argv_len_sum = c->argv_len_sum_parsing;
                 cmd->cmd = lookupCommand(cmd->argv, cmd->argc);
                 cmd->slot = getSlotFromCommand(c->iolookedcmd, c->argv, c->argc);
+                listAddNodeTail(c->cmds, cmd);
 
                 c->argc_parsing = 0;
                 c->argv_parsing = NULL;
                 c->argv_len_parsing = 0;
                 c->argv_len_sum_parsing = 0;
 
-                enqueuePendingClientsToMainThread(c, 0);
-                continue;
+                c->reqtype = 0;
+                c->multibulklen = 0;
+                c->bulklen = -1;
             }
 
-            /* We are finally ready to execute the command. */
-            if (processCommandAndResetClient(c) == C_ERR) {
-                /* If the client is no longer valid, we avoid exiting this
-                 * loop and trimming the client buffer later. So we return
-                 * ASAP in that case. */
-                return C_ERR;
-            }
+            // /* We are finally ready to execute the command. */
+            // if (processCommandAndResetClient(c) == C_ERR) {
+            //     /* If the client is no longer valid, we avoid exiting this
+            //      * loop and trimming the client buffer later. So we return
+            //      * ASAP in that case. */
+            //     return C_ERR;
+            // }
+        }
+    }
+    if (listLength(c->cmds)) {
+        if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+            c->io_flags |= CLIENT_IO_PENDING_COMMAND;
+            enqueuePendingClientsToMainThread(c, 0);
         }
     }
 

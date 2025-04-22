@@ -460,14 +460,21 @@ int processClientsFromIOThread(IOThread *t) {
 
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
-            // printf("process pending command number %d\n", c->pending_cmds_count);
-            for (int i = 0; i < c->pending_cmds_count; i++) {
-                c->argc = c->pending_cmds[i].argc;
-                c->argv = c->pending_cmds[i].argv;
-                c->argv_len = c->pending_cmds[i].argv_len;
-                c->argv_len_sum = c->pending_cmds[i].argv_len_sum;
-                c->iolookedcmd = c->pending_cmds[i].cmd;
-                serverAssert(processCommandAndResetClient(c) == C_OK);
+            listIter li;
+            listNode *ln;
+            ClientCommand *cmd;
+            listRewind(c->cmds, &li);
+            while ((ln = listNext(&li))) {
+                cmd = listNodeValue(ln);
+                c->argc = cmd->argc;
+                c->argv = cmd->argv;
+                c->argv_len = cmd->argv_len;
+                c->argv_len_sum = cmd->argv_len_sum;
+                c->iolookedcmd = cmd->cmd;
+ 
+                if (processCommandAndResetClient(c) == C_ERR) {
+                    continue;
+                }
             }
         }
 
@@ -591,10 +598,15 @@ int processClientsFromMainThread(IOThread *t) {
 
         /* Free deferred objects now. */
         freeDeferredObjects(c, 0);
-        for (int i = 0; i < c->pending_cmds_count; i++) {
-            zfree(c->pending_cmds[i].argv);
+        listIter li;
+        listNode *ln;
+        ClientCommand *cmd;
+        listRewind(c->cmds, &li);
+        while ((ln = listNext(&li))) {
+            cmd = listNodeValue(ln);
+            zfree(cmd->argv);
         }
-        c->pending_cmds_count = 0;
+        listEmpty(c->cmds);
 
         /* The client is asked to close, we just let main thread free it. */
         if (c->io_flags & CLIENT_IO_CLOSE_ASAP) {

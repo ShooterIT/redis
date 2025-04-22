@@ -1351,8 +1351,7 @@ typedef struct client {
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
     robj **deferred_objects;    /* List of deferred objects to free. */
     int deferred_objects_num; /* Number of deferred objects to free. */
-    ClientCommand pending_cmds[32]; /* Array of pending commands to execute. */
-    int pending_cmds_count; /* Number of pending commands. */
+    list *cmds; /* List of pending commands to execute. */
     int argc_parsing;
     robj **argv_parsing;
     int argv_len_parsing;
