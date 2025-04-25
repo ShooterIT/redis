@@ -308,6 +308,17 @@ int sendPendingClientsToIOThreads(void) {
     return processed;
 }
 
+void prefetchIOThreadCommand(IOThread *t) {
+    listIter li;
+    listNode *ln;
+    listRewind(mainThreadProcessingClients[t->id], &li);
+    while((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        addCommandToBatchAndProcessIfFull(c);
+    }
+    prefetchCommands();
+}
+
 extern int ProcessingEventsWhileBlocked;
 
 /* The main thread processes the clients from IO threads, these clients may have
@@ -321,6 +332,8 @@ extern int ProcessingEventsWhileBlocked;
  * it may call this function reentrantly. */
 void processClientsFromIOThread(IOThread *t) {
     listNode *node = NULL;
+
+    prefetchIOThreadCommand(t);
 
     while (listLength(mainThreadProcessingClients[t->id])) {
         /* Each time we pop up only the first client to process to guarantee
@@ -405,6 +418,8 @@ void processClientsFromIOThread(IOThread *t) {
         pthread_mutex_unlock(&(t->pending_clients_mutex));
         triggerEventNotifier(t->pending_clients_notifier);
     }
+
+    resetCommandsBatch();
 }
 
 /* When the io thread finishes processing the client with the read event, it will
@@ -559,6 +574,8 @@ void initThreadedIO(void) {
                              "The maximum number is %d.", IO_THREADS_MAX_NUM);
         exit(1);
     }
+
+    prefetchCommandsBatchInit();
 
     /* Spawn and initialize the I/O threads. */
     for (int i = 1; i < server.io_threads_num; i++) {
