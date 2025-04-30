@@ -299,6 +299,19 @@ int getKeySlot(sds key) {
     return calculateKeySlot(key);
 }
 
+void getKeysAndSlotFromCommand(client *c, struct redisCommand * cmd) {
+    if (cmd == NULL) return;
+    serverAssert(c->getkeys != NULL);
+    getKeysFreeResult(c->getkeys);
+    initGetKeysResult(c->getkeys);
+    int num_keys = getKeysFromCommand(cmd, c->argv, c->argc, c->getkeys);
+
+    if (num_keys > 0 && server.cluster_enabled) {
+        robj *first = c->argv[c->getkeys->keys[0].pos];
+        c->slot = keyHashSlot(first->ptr, sdslen(first->ptr));
+    }
+}
+
 /* This is a special version of dbAdd() that is used only when loading
  * keys from the RDB file: the key is passed as an SDS string that is
  * retained by the function (and not freed by the caller).

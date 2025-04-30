@@ -90,6 +90,7 @@ void keepClientInMainThread(client *c) {
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
     c->tid = IOTHREAD_MAIN_THREAD_ID;
     freeDeferredObjects(c, 1); /* Free deferred objects. */
+    getKeysFreeResult(c->getkeys); /* Free getkeys result. */
     /* Main thread starts to manage it. */
     server.io_threads_clients_num[c->tid]++;
 }
@@ -125,6 +126,7 @@ void fetchClientFromIOThread(client *c) {
     /* Unbind connection of client from io thread event loop. */
     connUnbindEventLoop(c->conn);
     freeDeferredObjects(c, 1); /* Free deferred objects. */
+    getKeysFreeResult(c->getkeys); /* Free getkeys result. */
     /* Now main thread can process it. */
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
     resumeIOThread(c->tid);
@@ -171,6 +173,7 @@ void assignClientToIOThread(client *c) {
     /* The client in IO thread may have several deferred objects. */
     serverAssert(c->deferred_objects == NULL);
     c->deferred_objects = zmalloc(sizeof(robj*) * CLIENT_MAX_DEFERRED_OBJECTS);
+    if (!c->getkeys) c->getkeys = zmalloc(sizeof(getKeysResult));
 
     /* Unbind connection of client from main thread event loop, disable read and
      * write, and then put it in the list, main thread will send these clients
@@ -343,20 +346,20 @@ int prefetchIOThreadCommand(IOThread *t) {
     int len = listLength(mainThreadProcessingClients[t->id]);
     if (len < 2) return 0;
 
-    int iterate = 0;
+    int clients = 0;
     int prefetch = len < server.prefetch_batch_max_size*2 ? len :
                          server.prefetch_batch_max_size;
 
     listIter li;
     listNode *ln;
     listRewind(mainThreadProcessingClients[t->id], &li);
-    while((ln = listNext(&li)) && iterate++ < prefetch) {
+    while((ln = listNext(&li)) && clients++ < prefetch) {
         client *c = listNodeValue(ln);
-        addCommandToBatch(c);
+        if (addCommandToBatch(c) == C_ERR) break;
     }
     prefetchCommands();
 
-    return prefetch;
+    return clients;
 }
 
 extern int ProcessingEventsWhileBlocked;
@@ -407,13 +410,15 @@ int processClientsFromIOThread(IOThread *t) {
     size_t processed = listLength(mainThreadProcessingClients[t->id]);
     if (processed == 0) return 0;
 
-    int prefetch = 0;
+    int prefetch_clients = 0;
+    resetCommandsBatch();
+
     listNode *node = NULL;
     while (listLength(mainThreadProcessingClients[t->id])) {
 
         if (server.prefetch_batch_max_size) {
-            if (prefetch <= 0) prefetch = prefetchIOThreadCommand(t);
-            if (--prefetch <= 0) resetCommandsBatch();
+            if (prefetch_clients <= 0) prefetch_clients = prefetchIOThreadCommand(t);
+            if (--prefetch_clients <= 0) resetCommandsBatch();
         }
 
         /* Each time we pop up only the first client to process to guarantee
@@ -480,7 +485,6 @@ int processClientsFromIOThread(IOThread *t) {
         sendPendingClientsToIOThreadIfNeeded(t, 1);
     }
     if (node) zfree(node);
-    resetCommandsBatch();
 
     /* Send the clients to io thread without pending size check, since main thread
      * may process clients from other io threads, so we need to send them to the

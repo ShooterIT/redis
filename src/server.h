@@ -1251,6 +1251,33 @@ typedef struct {
             (server.cluster_compatibility_sample_ratio == 100 || \
              (double)rand()/RAND_MAX * 100 < server.cluster_compatibility_sample_ratio)
 
+/* we use 6 so that all getKeyResult fits a cacheline */
+#define MAX_KEYS_BUFFER 6
+
+typedef struct {
+    int pos; /* The position of the key within the client array */
+    int flags; /* The flags associated with the key access, see
+                  CMD_KEY_* for more information */
+} keyReference;
+
+/* A result structure for the various getkeys function calls. It lists the
+ * keys as indices to the provided argv. This functionality is also re-used
+ * for returning channel information.
+ */
+typedef struct {
+    int numkeys;                                 /* Number of key indices return */
+    int size;                                    /* Available array size */
+    keyReference keysbuf[MAX_KEYS_BUFFER];       /* Pre-allocated buffer, to save heap allocations */
+    keyReference *keys;                          /* Key indices array, points to keysbuf or heap */
+} getKeysResult;
+#define GETKEYS_RESULT_INIT { 0, MAX_KEYS_BUFFER, {{0}}, NULL }
+
+static inline void initGetKeysResult(getKeysResult *result) {
+    result->numkeys = 0;
+    result->size = MAX_KEYS_BUFFER;
+    result->keys = NULL;
+}
+
 #ifdef LOG_REQ_RES
 /* Structure used to log client's requests and their
  * responses (see logreqres.c) */
@@ -1300,6 +1327,7 @@ typedef struct client {
     size_t argv_len_sum;    /* Sum of lengths of objects in argv list. */
     robj **deferred_objects;    /* List of deferred objects to free. */
     int deferred_objects_num; /* Number of deferred objects to free. */
+    getKeysResult *getkeys;   /* Get keys result of client argv. */
     struct redisCommand *cmd, *lastcmd;  /* Last command executed. */
     struct redisCommand *iolookedcmd;    /* Command looked up in IO threads. */
     struct redisCommand *realcmd; /* The original command that was executed by the client,
@@ -2248,27 +2276,6 @@ struct redisServer {
     /* Local environment */
     char *locale_collate;
 };
-
-/* we use 6 so that all getKeyResult fits a cacheline */
-#define MAX_KEYS_BUFFER 6
-
-typedef struct {
-    int pos; /* The position of the key within the client array */
-    int flags; /* The flags associated with the key access, see
-                  CMD_KEY_* for more information */
-} keyReference;
-
-/* A result structure for the various getkeys function calls. It lists the
- * keys as indices to the provided argv. This functionality is also re-used
- * for returning channel information.
- */
-typedef struct {
-    int numkeys;                                 /* Number of key indices return */
-    int size;                                    /* Available array size */
-    keyReference keysbuf[MAX_KEYS_BUFFER];       /* Pre-allocated buffer, to save heap allocations */
-    keyReference *keys;                          /* Key indices array, points to keysbuf or heap */
-} getKeysResult;
-#define GETKEYS_RESULT_INIT { 0, MAX_KEYS_BUFFER, {{0}}, NULL }
 
 /* Key specs definitions.
  *
@@ -3342,6 +3349,7 @@ void dismissMemoryInChild(void);
 int restartServer(int flags, mstime_t delay);
 int getKeySlot(sds key);
 int calculateKeySlot(sds key);
+void getKeysAndSlotFromCommand(client *c, struct redisCommand * cmd);
 
 /* kvstore wrappers */
 int dbExpand(redisDb *db, uint64_t db_size, int try_expand);

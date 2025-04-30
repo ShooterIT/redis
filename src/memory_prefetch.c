@@ -1,11 +1,11 @@
 /*
-* Copyright Valkey Contributors.
-* All rights reserved.
-* SPDX-License-Identifier: BSD 3-Clause
-*
-* This file utilizes prefetching keys and data for multiple commands in a batch,
-* to improve performance by amortizing memory access costs across multiple operations.
-*/
+ * Copyright Valkey Contributors.
+ * All rights reserved.
+ * SPDX-License-Identifier: BSD 3-Clause
+ *
+ * This file utilizes prefetching keys and data for multiple commands in a batch,
+ * to improve performance by amortizing memory access costs across multiple operations.
+ */
 
 #include "memory_prefetch.h"
 #include "server.h"
@@ -23,31 +23,31 @@ typedef enum {
 
 
 /************************************ State machine diagram for the prefetch operation. ********************************
-                                                        │
-                                                        start
-                                                        │
-                                                ┌────────▼─────────┐
-                                    ┌─────────►│  PREFETCH_BUCKET ├────►────────┐
-                                    │          └────────┬─────────┘            no more tables -> done
-                                    |             bucket|found                  |
-                                    │                   |                       │
+                                                           │
+                                                         start
+                                                           │
+                                                  ┌────────▼─────────┐
+                                       ┌─────────►│  PREFETCH_BUCKET ├────►────────┐
+                                       │          └────────┬─────────┘            no more tables -> done
+                                       |             bucket|found                  |
+                                       │                   |                       │
         entry not found - goto next table         ┌────────▼────────┐              │
-                                    └────◄─────┤ PREFETCH_ENTRY  |              ▼
+                                       └────◄─────┤ PREFETCH_ENTRY  |              ▼
                                     ┌────────────►└────────┬────────┘              │
                                     |                 Entry│found                  │
                                     │                      |                       │
-    value not found - goto next entry           ┌───────▼────────┐              |
+       value not found - goto next entry           ┌───────▼────────┐              |
                                     └───────◄──────┤ PREFETCH_VALUE |              ▼
-                                                └───────┬────────┘              │
-                                                    Value│found                  │
-                                                        |                       |
-                                            ┌───────────▼──────────────┐        │
-                                            │    PREFETCH_VALUE_DATA   │        ▼
-                                            └───────────┬──────────────┘        │
-                                                        |                       │
-                                                ┌───────-─▼─────────────┐         │
-                                                │     PREFETCH_DONE     │◄────────┘
-                                                └───────────────────────┘
+                                                   └───────┬────────┘              │
+                                                      Value│found                  │
+                                                           |                       |
+                                               ┌───────────▼──────────────┐        │
+                                               │    PREFETCH_VALUE_DATA   │        ▼
+                                               └───────────┬──────────────┘        │
+                                                           |                       │
+                                                 ┌───────-─▼─────────────┐         │
+                                                 │     PREFETCH_DONE     │◄────────┘
+                                                 └───────────────────────┘
 **********************************************************************************************************************/
 
 typedef void *(*GetValueDataFunc)(const void *val);
@@ -165,7 +165,7 @@ static void initBatchInfo(dict **dicts) {
 }
 
 /* Prefetch the bucket of the next hash table index.
-* If no tables are left, move to the PREFETCH_DONE state. */
+ * If no tables are left, move to the PREFETCH_DONE state. */
 static void prefetchBucket(KeyPrefetchInfo *info) {
     size_t i = batch->cur_idx;
 
@@ -188,7 +188,7 @@ static void prefetchBucket(KeyPrefetchInfo *info) {
 }
 
 /* Prefetch the next entry in the bucket and move to the PREFETCH_VALUE state.
-* If no more entries in the bucket, move to the PREFETCH_BUCKET state to look at the next table. */
+ * If no more entries in the bucket, move to the PREFETCH_BUCKET state to look at the next table. */
 static void prefetchEntry(KeyPrefetchInfo *info) {
     size_t i = batch->cur_idx;
 
@@ -210,7 +210,7 @@ static void prefetchEntry(KeyPrefetchInfo *info) {
 }
 
 /* Prefetch the entry's value. If the value is found, move to the PREFETCH_VALUE_DATA state.
-* If the value is not found, move to the PREFETCH_ENTRY state to look at the next entry in the bucket. */
+ * If the value is not found, move to the PREFETCH_ENTRY state to look at the next entry in the bucket. */
 static void prefetchValue(KeyPrefetchInfo *info) {
     size_t i = batch->cur_idx;
     void *value = dictGetVal(info->current_entry);
@@ -244,26 +244,26 @@ static void prefetchValueData(KeyPrefetchInfo *info, GetValueDataFunc get_val_da
 }
 
 /* Prefetch dictionary data for an array of keys.
-*
-* This function takes an array of dictionaries and keys, attempting to bring
-* data closer to the L1 cache that might be needed for dictionary operations
-* on those keys.
-*
-* The dictFind algorithm:
-* 1. Evaluate the hash of the key
-* 2. Access the index in the first table
-* 3. Walk the entries linked list until the key is found
-*    If the key hasn't been found and the dictionary is in the middle of rehashing,
-*    access the index on the second table and repeat step 3
-*
-* dictPrefetch executes the same algorithm as dictFind, but one step at a time
-* for each key. Instead of waiting for data to be read from memory, it prefetches
-* the data and then moves on to execute the next prefetch for another key.
-*
-* dicts - An array of dictionaries to prefetch data from.
-* get_val_data_func - A callback function that dictPrefetch can invoke
-* to bring the key's value data closer to the L1 cache as well.
-*/
+ *
+ * This function takes an array of dictionaries and keys, attempting to bring
+ * data closer to the L1 cache that might be needed for dictionary operations
+ * on those keys.
+ *
+ * The dictFind algorithm:
+ * 1. Evaluate the hash of the key
+ * 2. Access the index in the first table
+ * 3. Walk the entries linked list until the key is found
+ *    If the key hasn't been found and the dictionary is in the middle of rehashing,
+ *    access the index on the second table and repeat step 3
+ *
+ * dictPrefetch executes the same algorithm as dictFind, but one step at a time
+ * for each key. Instead of waiting for data to be read from memory, it prefetches
+ * the data and then moves on to execute the next prefetch for another key.
+ *
+ * dicts - An array of dictionaries to prefetch data from.
+ * get_val_data_func - A callback function that dictPrefetch can invoke
+ * to bring the key's value data closer to the L1 cache as well.
+ */
 static void dictPrefetch(dict **dicts, GetValueDataFunc get_val_data_func) {
     initBatchInfo(dicts);
     KeyPrefetchInfo *info;
@@ -291,11 +291,16 @@ void resetCommandsBatch(void) {
     batch->key_count = 0;
     batch->client_count = 0;
     batch->executed_commands = 0;
+
+    /* Handle the case where the max prefetch size has been changed. */
+    if (batch->max_prefetch_size != (size_t)server.prefetch_batch_max_size * 2) {
+        onMaxBatchSizeChange();
+    }
 }
 
 /* Prefetch command-related data:
-* 1. Prefetch the command arguments allocated by the I/O thread to bring them closer to the L1 cache.
-* 2. Prefetch the keys and values for all commands in the current batch from the main and expires dictionaries. */
+ * 1. Prefetch the command arguments allocated by the I/O thread to bring them closer to the L1 cache.
+ * 2. Prefetch the keys and values for all commands in the current batch from the main and expires dictionaries. */
 void prefetchCommands(void) {
     /* Prefetch argv's for all clients */
     for (size_t i = 0; i < batch->client_count; i++) {
@@ -333,35 +338,6 @@ void prefetchCommands(void) {
     }
 }
 
-/* Processes all the prefetched commands in the current batch. */
-void processClientsCommandsBatch(void) {
-    if (!batch || batch->client_count == 0) return;
-
-    /* If executed_commands is not 0,
-    * it means that we are in the middle of processing a batch and this is a recursive call */
-    if (batch->executed_commands == 0) {
-        prefetchCommands();
-    }
-
-    /* Process the commands */
-    for (size_t i = 0; i < batch->client_count; i++) {
-        client *c = batch->clients[i];
-        if (c == NULL) continue;
-
-        /* Set the client to null immediately to avoid accessing it again recursively when ProcessingEventsWhileBlocked */
-        batch->clients[i] = NULL;
-        batch->executed_commands++;
-        if (processPendingCommandAndInputBuffer(c) != C_ERR) beforeNextClient(c);
-    }
-
-    resetCommandsBatch();
-
-    /* Handle the case where the max prefetch size has been changed. */
-    if (batch->max_prefetch_size != (size_t)server.prefetch_batch_max_size) {
-        onMaxBatchSizeChange();
-    }
-}
-
 /* Adds the client's command to the current batch.
  *
  * Returns C_OK if the command was added successfully, C_ERR otherwise. */
@@ -378,17 +354,15 @@ int addCommandToBatch(client *c) {
     batch->clients[batch->client_count++] = c;
 
     /* Get command's keys positions */
-    if (c->iolookedcmd) {
-        getKeysResult result = GETKEYS_RESULT_INIT;
-        int num_keys = getKeysFromCommand(c->iolookedcmd, c->argv, c->argc, &result);
-        for (int i = 0; i < num_keys && batch->key_count < batch->max_prefetch_size; i++) {
-            batch->keys[batch->key_count] = c->argv[result.keys[i].pos];
+    if (c->iolookedcmd && c->getkeys) {
+        getKeysResult *result = c->getkeys;
+        for (int i = 0; i < result->numkeys && batch->key_count < batch->max_prefetch_size; i++) {
+            batch->keys[batch->key_count] = c->argv[result->keys[i].pos];
             batch->slots[batch->key_count] = c->slot > 0 ? c->slot : 0;
             batch->keys_dicts[batch->key_count] = kvstoreGetDict(c->db->keys, batch->slots[batch->key_count]);
             batch->expire_dicts[batch->key_count] = kvstoreGetDict(c->db->expires, batch->slots[batch->key_count]);
             batch->key_count++;
         }
-        getKeysFreeResult(&result);
     }
 
     return C_OK;

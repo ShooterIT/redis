@@ -139,6 +139,7 @@ client *createClient(connection *conn) {
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
     c->deferred_objects = NULL;
     c->deferred_objects_num = 0;
+    c->getkeys = NULL;
     if (conn) server.io_threads_clients_num[c->tid]++;
 #ifdef LOG_REQ_RES
     reqresReset(c, 0);
@@ -1813,6 +1814,8 @@ void freeClient(client *c) {
     freeClientArgv(c);
     freeClientOriginalArgv(c);
     freeDeferredObjects(c, 1);
+    getKeysFreeResult(c->getkeys);
+    zfree(c->getkeys);
     if (c->deferred_reply_errors)
         listRelease(c->deferred_reply_errors);
 #ifdef LOG_REQ_RES
@@ -2873,6 +2876,7 @@ int processInputBuffer(client *c) {
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
                 c->io_flags |= CLIENT_IO_PENDING_COMMAND;
                 c->iolookedcmd = lookupCommand(c->argv, c->argc);
+                getKeysAndSlotFromCommand(c, c->iolookedcmd);
                 enqueuePendingClientsToMainThread(c, 0);
                 break;
             }
