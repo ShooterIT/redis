@@ -1643,6 +1643,30 @@ void blockingOperationEnds(void) {
     }
 }
 
+int prefetchMainThreadCommands(list *l) {
+    /* Since small batch prefetching is not much effective, so if the remaining
+     * is small (less than twice the max batch size), prefetch all of it. */
+    int len = listLength(l);
+    int config_size = getConfigPrefetchBatchSize();
+    int to_prefetch = len < config_size*2 ? len : config_size;
+    if (to_prefetch == 0) return 0;
+
+    int clients = 0;
+    listIter li;
+    listNode *ln;
+    listRewind(l, &li);
+    while((ln = listNext(&li)) && clients++ < to_prefetch) {
+        client *c = listNodeValue(ln);
+        /* One command may have several keys, the batch may be full,
+         * so we stop prefetching if failed. */
+        if (addCommandToBatch(c) == C_ERR) break;
+    }
+
+    /* Prefetch the commands in the batch. */
+    prefetchCommands();
+    return clients;
+}
+
 /* This function fills in the role of serverCron during RDB or AOF loading, and
  * also during blocked scripts.
  * It attempts to do its duties at a similar rate as the configured server.hz,
@@ -1843,6 +1867,41 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
          * to 0, some client may be transferred without notification. */
         processClientsOfAllIOThreads();
     }
+    
+    /* Run the list of clients again to process the new buffers. */
+    listIter li;
+    listNode *ln;
+    resetCommandsBatch();
+    int prefetch_clients = 0;
+    while(listLength(server.clients_pending_read)) {
+        /* Prefetch the commands if no clients in the batch. */
+        if (prefetch_clients <= 0) prefetch_clients = prefetchMainThreadCommands(server.clients_pending_read);
+        /* Reset the prefetching batch if we have processed all clients. */
+        if (--prefetch_clients <= 0) resetCommandsBatch();
+        
+        ln = listFirst(server.clients_pending_read);
+        client *c = listNodeValue(ln);
+        listDelNode(server.clients_pending_read,ln);
+        c->pending_read_list_node = NULL;
+
+        if (beforeNextClient(c) == C_ERR) {
+            /* If the client is no longer valid, we avoid
+             * processing the client later. So we just go
+             * to the next. */
+            continue;
+        }
+
+        /* Once io-threads are idle we can update the client in the mem usage */
+        updateClientMemUsageAndBucket(c);
+
+        if (processPendingCommandAndInputBuffer(c) == C_ERR) {
+            /* If the client is no longer valid, we avoid
+             * processing the client later. So we just go
+             * to the next. */
+            continue;
+        }
+    }
+
 
     /* Handle writes with pending output buffers. */
     handleClientsWithPendingWrites();

@@ -678,6 +678,7 @@ void *IOThreadMain(void *ptr) {
 
 /* Initialize the data structures needed for threaded I/O. */
 void initThreadedIO(void) {
+    prefetchCommandsBatchInit();
     if (server.io_threads_num <= 1) return;
 
     server.io_threads_active = 1;
@@ -688,7 +689,7 @@ void initThreadedIO(void) {
         exit(1);
     }
 
-    prefetchCommandsBatchInit();
+    //prefetchCommandsBatchInit();
 
     /* Spawn and initialize the I/O threads. */
     for (int i = 1; i < server.io_threads_num; i++) {

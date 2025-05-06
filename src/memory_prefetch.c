@@ -320,26 +320,26 @@ int getConfigPrefetchBatchSize(void) {
 void prefetchCommands(void) {
     if (!batch) return;
 
-    /* Prefetch argv's for all clients */
-    for (size_t i = 0; i < batch->client_count; i++) {
-        client *c = batch->clients[i];
-        if (!c || c->argc <= 1) continue;
-        /* Skip prefetching first argv (cmd name) it was already looked up by the I/O thread. */
-        for (int j = 1; j < c->argc; j++) {
-            redis_prefetch(c->argv[j]);
-        }
-    }
+    // /* Prefetch argv's for all clients */
+    // for (size_t i = 0; i < batch->client_count; i++) {
+    //     client *c = batch->clients[i];
+    //     if (!c || c->argc <= 1) continue;
+    //     /* Skip prefetching first argv (cmd name) it was already looked up by the I/O thread. */
+    //     for (int j = 1; j < c->argc; j++) {
+    //         redis_prefetch(c->argv[j]);
+    //     }
+    // }
 
-    /* Prefetch the argv->ptr if required */
-    for (size_t i = 0; i < batch->client_count; i++) {
-        client *c = batch->clients[i];
-        if (!c || c->argc <= 1) continue;
-        for (int j = 1; j < c->argc; j++) {
-            if (c->argv[j]->encoding == OBJ_ENCODING_RAW) {
-                redis_prefetch(c->argv[j]->ptr);
-            }
-        }
-    }
+    // /* Prefetch the argv->ptr if required */
+    // for (size_t i = 0; i < batch->client_count; i++) {
+    //     client *c = batch->clients[i];
+    //     if (!c || c->argc <= 1) continue;
+    //     for (int j = 1; j < c->argc; j++) {
+    //         if (c->argv[j]->encoding == OBJ_ENCODING_RAW) {
+    //             redis_prefetch(c->argv[j]->ptr);
+    //         }
+    //     }
+    // }
 
     /* Get the keys ptrs - we do it here after the key obj was prefetched. */
     for (size_t i = 0; i < batch->key_count; i++) {

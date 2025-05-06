@@ -2876,6 +2876,13 @@ int processInputBuffer(client *c) {
                 break;
             }
 
+            if (server.prefetch_batch_max_size) {
+                c->flags |= CLIENT_PENDING_COMMAND;
+                listAddNodeTail(server.clients_pending_read, c);
+                c->pending_read_list_node = listLast(server.clients_pending_read);
+                break;
+            }
+
             /* We are finally ready to execute the command. */
             if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, we avoid exiting this
