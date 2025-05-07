@@ -2878,6 +2878,8 @@ int processInputBuffer(client *c) {
 
             if (server.prefetch_batch_max_size) {
                 c->flags |= CLIENT_PENDING_COMMAND;
+                c->iolookedcmd = lookupCommand(c->argv, c->argc);
+                c->slot = getSlotFromCommand(c->iolookedcmd, c->argv, c->argc);
                 listAddNodeTail(server.clients_pending_read, c);
                 c->pending_read_list_node = listLast(server.clients_pending_read);
                 break;
