@@ -3,8 +3,9 @@
  * Copyright (c) 2009-Present, Redis Ltd.
  * All rights reserved.
  *
- * Licensed under your choice of the Redis Source Available License 2.0
- * (RSALv2) or the Server Side Public License v1 (SSPLv1).
+ * Licensed under your choice of (a) the Redis Source Available License 2.0
+ * (RSALv2); or (b) the Server Side Public License v1 (SSPLv1); or (c) the
+ * GNU Affero General Public License v3 (AGPLv3).
  *
  * ---------------------------------------------------------------------------
  *
@@ -568,7 +569,7 @@ static void handleClientsBlockedOnKey(readyList *rl) {
         long count = listLength(clients);
         while ((ln = listNext(&li)) && count--) {
             client *receiver = listNodeValue(ln);
-            robj *o = lookupKeyReadWithFlags(rl->db, rl->key, LOOKUP_NOEFFECTS);
+            kvobj *o = lookupKeyReadWithFlags(rl->db, rl->key, LOOKUP_NOEFFECTS);
             /* 1. In case new key was added/touched we need to verify it satisfy the
              *    blocked type, since we might process the wrong key type.
              * 2. We want to serve clients blocked on module keys

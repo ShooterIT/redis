@@ -5,8 +5,9 @@
 # Copyright (c) 2024-present, Valkey contributors.
 # All rights reserved.
 #
-# Licensed under your choice of the Redis Source Available License 2.0
-# (RSALv2) or the Server Side Public License v1 (SSPLv1).
+# Licensed under your choice of (a) the Redis Source Available License 2.0
+# (RSALv2); or (b) the Server Side Public License v1 (SSPLv1); or (c) the
+# GNU Affero General Public License v3 (AGPLv3).
 #
 # Portions of this file are available under BSD3 terms; see REDISCONTRIBUTIONS for more information.
 #
@@ -580,9 +581,9 @@ proc find_valgrind_errors {stderr on_termination} {
 # Execute a background process writing random data for the specified number
 # of seconds to the specified Redis instance. If key is omitted, a random key
 # is used for every SET command.
-proc start_write_load {host port seconds {key ""}} {
+proc start_write_load {host port seconds {key ""} {size 0} {sleep 0}} {
     set tclsh [info nameofexecutable]
-    exec $tclsh tests/helpers/gen_write_load.tcl $host $port $seconds $::tls $key &
+    exec $tclsh tests/helpers/gen_write_load.tcl $host $port $seconds $::tls $key $size $sleep &
 }
 
 # Stop a process generating write load executed with start_write_load.
