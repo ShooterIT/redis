@@ -608,10 +608,18 @@ int processClientsFromMainThread(IOThread *t) {
          * need to process the remaining queries if needed. */
         if (c->querybuf && sdslen(c->querybuf) > 0) {
             processInputBuffer(c);
+            if (c->io_flags & CLIENT_IO_PENDING_COMMAND)
+                continue;
+        }
+
+        if (c->qb_pos) {
+            /* Trim to pos */
+            sdsrange(c->querybuf,c->qb_pos,-1);
+            c->qb_pos = 0;
         }
 
         /* If the client has pending replies, write replies to client. */
-        if ((c->io_flags & CLIENT_IO_WRITE_ENABLED) && clientHasPendingReplies(c)) {
+        if (clientHasPendingReplies(c)) {
             writeToClient(c, 0);
             if (!(c->io_flags & CLIENT_IO_CLOSE_ASAP) && clientHasPendingReplies(c)) {
                 connSetWriteHandler(c->conn, sendReplyToClient);
