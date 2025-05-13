@@ -51,17 +51,18 @@ void enqueuePendingClientsToMainThread(client *c, int unbind) {
     if (unbind) connUnbindEventLoop(c->conn);
     /* Just skip if it already is transferred. */
     if (c->io_thread_client_list_node) {
+        IOThread *t = &IOThreads[c->tid];
         /* If there are several clients to process, let the main thread handle them ASAP.
          * Since the client being added to the queue may still need to be processed by
          * the IO thread, we must call this before adding it to the queue to avoid
          * races with the main thread. */
-        sendPendingClientsToMainThreadIfNeeded(&IOThreads[c->tid], 1);
-        /* Remove the client from clients list of IO thread. */
-        listDelNode(IOThreads[c->tid].clients, c->io_thread_client_list_node);
-        c->io_thread_client_list_node = NULL;
+        sendPendingClientsToMainThreadIfNeeded(t, 1);
         /* Disable read and write to avoid race when main thread processes. */
         c->io_flags &= ~(CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED);
-        listAddNodeTail(IOThreads[c->tid].pending_clients_to_main_thread, c);
+        /* Remove the client from IO thread, add it to main thread's pending list. */
+        listUnlinkNode(t->clients, c->io_thread_client_list_node);
+        listLinkNodeTail(t->pending_clients_to_main_thread, c->io_thread_client_list_node);
+        c->io_thread_client_list_node = NULL;
     }
 }
 
@@ -95,6 +96,7 @@ void keepClientInMainThread(client *c) {
     c->tid = IOTHREAD_MAIN_THREAD_ID;
     /* Main thread starts to manage it. */
     server.io_threads_clients_num[c->tid]++;
+    trimClientQueryBuffer(c); /* Avoid missing trim in IO threads. */
 }
 
 /* If the client is managed by IO thread, we should fetch it from IO thread
@@ -130,6 +132,7 @@ void fetchClientFromIOThread(client *c) {
     /* Now main thread can process it. */
     c->running_tid = IOTHREAD_MAIN_THREAD_ID;
     resumeIOThread(c->tid);
+    trimClientQueryBuffer(c); /* Avoid missing trim in IO threads. */
 }
 
 /* For some clients, we must handle them in the main thread, since there is
@@ -454,8 +457,7 @@ int processClientsFromIOThread(IOThread *t) {
 
         /* Process the pending command and input buffer. */
         if (!c->read_error && c->io_flags & CLIENT_IO_PENDING_COMMAND) {
-            c->flags |= CLIENT_PENDING_COMMAND;
-            if (processPendingCommandAndInputBuffer(c) == C_ERR) {
+            if (processCommandAndResetClient(c) == C_ERR) {
                 /* If the client is no longer valid, it must be freed safely. */
                 continue;
             }
@@ -576,7 +578,8 @@ int processClientsFromMainThread(IOThread *t) {
 
         /* Link client in IO thread clients list first. */
         serverAssert(c->io_thread_client_list_node == NULL);
-        listAddNodeTail(t->clients, c);
+        listUnlinkNode(t->processing_clients, ln);
+        listLinkNodeTail(t->clients, ln);
         c->io_thread_client_list_node = listLast(t->clients);
 
         /* The client is asked to close, we just let main thread free it. */
@@ -596,6 +599,19 @@ int processClientsFromMainThread(IOThread *t) {
             connSetReadHandler(c->conn, readQueryFromClient);
         }
 
+        /* The main thread only handles the first parsed command, so IO threads
+         * need to process the remaining queries if needed. */
+        if (c->querybuf && sdslen(c->querybuf) > 0) {
+            if (processInputBuffer(c) == C_ERR) continue;
+            /* If a command is parsed, we transfer the client to the main thread to
+             * process, don't write pending replies to avoid many short write(2). */
+            if (c->io_flags & CLIENT_IO_PENDING_COMMAND)
+                continue;
+
+            /* Trim the query buffer ASAP when all commands in it have been processed. */
+            trimClientQueryBuffer(c);
+        }
+
         /* If the client has pending replies, write replies to client. */
         if (clientHasPendingReplies(c)) {
             writeToClient(c, 0);
@@ -604,7 +620,8 @@ int processClientsFromMainThread(IOThread *t) {
             }
         }
     }
-    listEmpty(t->processing_clients);
+    /* All clients must are processed. */
+    serverAssert(listLength(t->processing_clients) == 0);
     return processed;
 }
 
