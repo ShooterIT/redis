@@ -333,21 +333,29 @@ void prefetchCommands(void) {
     /* Prefetch argv's for all clients */
     for (size_t i = 0; i < batch->client_count; i++) {
         client *c = batch->clients[i];
-        if (!c || c->argc <= 1) continue;
+
+        
+        if (!c) continue;
         /* Skip prefetching first argv (cmd name) it was already looked up by
          * the I/O thread. */
-        for (int j = 1; j < c->argc; j++) {
-            redis_prefetch(c->argv[j]);
+        for (int i = 0; i < c->pending_cmds_count; i++) {
+            ClientCommand *cmd = &c->pending_cmds[i]; 
+            for (int j = 1; j < cmd->argc; j++) {
+                redis_prefetch(cmd->argv[j]);
+            }
         }
     }
 
     /* Prefetch the argv->ptr if required */
     for (size_t i = 0; i < batch->client_count; i++) {
         client *c = batch->clients[i];
-        if (!c || c->argc <= 1) continue;
-        for (int j = 1; j < c->argc; j++) {
-            if (c->argv[j]->encoding == OBJ_ENCODING_RAW) {
-                redis_prefetch(c->argv[j]->ptr);
+        if (!c) continue;
+        for (int i = 0; i < c->pending_cmds_count; i++) {
+            ClientCommand *cmd = &c->pending_cmds[i]; 
+            for (int j = 1; j < cmd->argc; j++) {
+                if (cmd->argv[j]->encoding == OBJ_ENCODING_RAW) {
+                    redis_prefetch(cmd->argv[j]->ptr);
+                }
             }
         }
     }
@@ -383,18 +391,21 @@ int addCommandToBatch(client *c) {
 
     batch->clients[batch->client_count++] = c;
 
-    if (likely(c->iolookedcmd)) {
-        /* Get command's keys positions */
-        getKeysResult result = GETKEYS_RESULT_INIT;
-        int num_keys = getKeysFromCommand(c->iolookedcmd, c->argv, c->argc, &result);
-        for (int i = 0; i < num_keys && batch->key_count < batch->max_prefetch_size; i++) {
-            batch->keys[batch->key_count] = c->argv[result.keys[i].pos];
-            batch->slots[batch->key_count] = c->slot > 0 ? c->slot : 0;
-            batch->keys_dicts[batch->key_count] =
-                kvstoreGetDict(c->db->keys, batch->slots[batch->key_count]);
-            batch->key_count++;
+    for (int i = 0; i < c->pending_cmds_count; i++) {
+        ClientCommand *cmd = &c->pending_cmds[i];
+        if (cmd->cmd) {
+            /* Get command's keys positions */
+            getKeysResult result = GETKEYS_RESULT_INIT;
+            int num_keys = getKeysFromCommand(cmd->cmd, cmd->argv, cmd->argc, &result);
+            for (int i = 0; i < num_keys && batch->key_count < batch->max_prefetch_size; i++) {
+                batch->keys[batch->key_count] = cmd->argv[result.keys[i].pos];
+                batch->slots[batch->key_count] = cmd->slot > 0 ? cmd->slot : 0;
+                batch->keys_dicts[batch->key_count] =
+                    kvstoreGetDict(c->db->keys, batch->slots[batch->key_count]);
+                batch->key_count++;
+            }
+            getKeysFreeResult(&result);
         }
-        getKeysFreeResult(&result);
     }
 
     return C_OK;
