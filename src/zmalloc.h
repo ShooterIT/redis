@@ -113,6 +113,8 @@ size_t zmalloc_get_smap_bytes_by_field(char *field, long pid);
 size_t zmalloc_get_memory_size(void);
 void zlibc_free(void *ptr);
 void zmadvise_dontneed(void *ptr);
+void zmalloc_main_thread_init(void);
+void zmalloc_main_thread_check(void);
 
 #if defined(USE_JEMALLOC)
 void *zmalloc_with_flags(size_t size, int flags);
