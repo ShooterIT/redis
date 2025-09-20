@@ -4271,9 +4271,6 @@ void clusterFailoverReplaceYourMaster(void) {
 
     /* 5) If there was a manual failover in progress, clear the state. */
     resetManualFailover();
-
-    /* 6) Check if we have keys in slots that does not belong to this node. */
-    asmTrimSlotsIfNotOwned();
 }
 
 /* This function is called if we are a slave node and our master serving
@@ -5294,8 +5291,12 @@ int verifyClusterConfigWithData(void) {
         } else {
             serverLog(LL_NOTICE, "I have keys for slot %d, but the slot is "
                                     "assigned to another node. "
-                                    "Setting it to importing state.",j);
-            server.cluster->importing_slots_from[j] = server.cluster->slots[j];
+                                    "Deleting keys in the slot.", j);
+
+            /* When using atomic slot migration, it's safe to drop unowned slot keys.
+             * This should not cause data loss for legacy slot migration, since we
+             * have persisted the importing state in node.conf */
+            clusterDelKeysInSlot(j, 0);
         }
     }
     if (update_config) clusterSaveConfigOrDie(1);
@@ -6558,7 +6559,6 @@ int clusterAllowFailoverCmd(client *c) {
 
 void clusterPromoteSelfToMaster(void) {
     replicationUnsetMaster();
-    asmTrimSlotsIfNotOwned();
 }
 
 int clusterAsmOnEvent(const char *task_id, int event, void *arg) {
@@ -6586,8 +6586,8 @@ int clusterAsmOnEvent(const char *task_id, int event, void *arg) {
             }
             /* New config and Bump new config */
             clusterBumpConfigEpochWithoutConsensus();
-            clusterBroadcastPong(CLUSTER_BROADCAST_ALL);
             clusterSaveConfigOrDie(1);
+            clusterBroadcastPong(CLUSTER_BROADCAST_ALL);
             clusterAsmProcess(task_id, ASM_EVENT_DONE, NULL, NULL);
             break;
         case ASM_EVENT_IMPORT_COMPLETED:

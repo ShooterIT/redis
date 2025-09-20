@@ -1520,6 +1520,17 @@ static void asmStartImportTask(asmTask *task) {
     if (task->operation != ASM_IMPORT || task->state != ASM_NONE) return;
     sds slot_ranges_str = slotRangeArrayToString(task->slot_ranges);
 
+    /* During ASM operations, a failover may occur. When promoting to master, we don't
+     * clean up unowned keys to prevent data loss from importing keys under the legacy
+     * slot migration approach. However, this strategy can leave dirty data behind.
+     * Therefore, before starting data import with ASM, we must trim unowned slot data.
+     *
+     * This also serves as a sanity check to prevent data inconsistency. Users may
+     * have aborted legacy slot migration without cleaning up dirty data before
+     * switching to the new atomic slot migration approach. Additionally, cluster
+     * plugins may not clean up dirty data as promised. */
+    asmTrimSlotsIfNotOwned();
+
     /* Check if there is any trim job in progress for the slot ranges.
      * We can't start the import task since the trim job will modify the data.*/
     int trim_in_progress = asmIsAnyTrimJobOverlaps(task->slot_ranges);
