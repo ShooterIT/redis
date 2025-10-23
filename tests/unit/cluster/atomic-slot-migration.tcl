@@ -785,7 +785,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set loglines [count_log_lines 0]
 
         # Start the slot 0 write load on the R 0
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 10000 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100000 $slot0_key]
 
         # wait for buffer to accumulate on source side (more than 1m)
         wait_for_condition 1000 10 {
