@@ -652,7 +652,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
             }
 
             # Start the slot 0 write load on the R 1
-            set load_handle [start_write_load "127.0.0.1" [get_port 1] 500 "06S"]
+            set load_handle [start_write_load "127.0.0.1" [get_port 1] 100 "06S" 500]
 
             # clear old fail points and set the new fail point
             assert_equal {OK} [R 0 debug asm-failpoint "" ""]
@@ -785,7 +785,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         set loglines [count_log_lines 0]
 
         # Start the slot 0 write load on the R 0
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100000 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 $slot0_key 1000]
 
         # wait for buffer to accumulate on source side (more than 1m)
         wait_for_condition 1000 10 {
@@ -1213,7 +1213,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # start the slot 0 write load on the node 0
         set slot0_key [slot_key 0 mykey]
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 $slot0_key 500]
 
         # wait for entering streaming buffer state
         wait_for_condition 1000 10 {
@@ -1346,7 +1346,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
         populate_slot 200 -idx 0 -slot 0 -size 16384
 
         # Start the slot 0 write load on the R 0
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 10000 [slot_key 0 mykey]]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 [slot_key 0 mykey] 1000]
 
         # wait for streaming buffer state, then pause the destination node
         wait_for_condition 1000 20 {
@@ -1385,7 +1385,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # start the slot 0 write load on the node 0
         set slot0_key [slot_key 0 mykey]
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 $slot0_key]
 
         # node 0 will fail since server paused timeout
         wait_for_condition 2000 10 {
@@ -1417,7 +1417,7 @@ start_cluster 3 3 {tags {external:skip cluster} overrides {cluster-node-timeout 
 
         # start the slot 0 write load on the node 0
         set slot0_key [slot_key 0 mykey]
-        set load_handle [start_write_load "127.0.0.1" [get_port 0] 1000 $slot0_key]
+        set load_handle [start_write_load "127.0.0.1" [get_port 0] 100 $slot0_key]
 
         # wait for entering streaming buffer state
         wait_for_condition 1000 10 {
