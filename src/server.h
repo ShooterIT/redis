@@ -2388,7 +2388,8 @@ struct redisServer {
     int list_max_listpack_size;
     int list_compress_depth;
     /* time cache */
-    redisAtomic time_t unixtime; /* Unix time sampled every cron cycle. */
+    time_t unixtime;                    /* Unix time sampled every cron cycle. */
+    redisAtomic time_t atomic_unixtime; /* Atomic unix time for threaded clients */
     time_t timezone;            /* Cached timezone. As set by tzset(). */
     redisAtomic int daylight_active; /* Currently in daylight saving time. */
     mstime_t mstime;            /* 'unixtime' in milliseconds. */

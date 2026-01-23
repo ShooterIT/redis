@@ -85,6 +85,14 @@ void freeClientReplyValue(void *o) {
     zfree(o);
 }
 
+/* Get the current unix time from the main thread's cache.
+ * This function is thread-safe. */
+static inline time_t atomicUnixTime(void) {
+    time_t unixtime;
+    atomicGet(server.atomic_unixtime, unixtime);
+    return unixtime;
+}
+
 /* This function links the client to the global linked list of clients.
  * unlinkClient() does the opposite, among other things. */
 void linkClient(client *c) {
@@ -2718,7 +2726,9 @@ int writeToClient(client *c, int handler_installed) {
          * as an interaction, since we always send REPLCONF ACK commands
          * that take some time to just fill the socket output buffer.
          * We just rely on data / pings received for timeout detection. */
-        if (!(c->flags & CLIENT_MASTER)) c->lastinteraction = server.unixtime;
+        if (!(c->flags & CLIENT_MASTER))
+            c->lastinteraction = c->running_tid == IOTHREAD_MAIN_THREAD_ID ?
+                                 server.unixtime : atomicUnixTime();
     }
     if (!clientHasPendingReplies(c)) {
         c->sentlen = 0;
@@ -2977,7 +2987,7 @@ int processInlineBuffer(client *c, pendingCommand *pcmd) {
              * Note c->repl_ack_time will still be updated in
              * updateClientDataFromIOThread with the value of c->io_repl_ack_time
              * when the client moves from IO to main thread. */
-            c->io_repl_ack_time = server.unixtime;
+            c->io_repl_ack_time = atomicUnixTime();
     }
 
     /* Masters should never send us inline protocol to run actual
@@ -3783,12 +3793,13 @@ void readQueryFromClient(connection *conn) {
     if (c->querybuf_peak < qblen) c->querybuf_peak = qblen;
 
     if (!(c->flags & CLIENT_MASTER) || c->running_tid == IOTHREAD_MAIN_THREAD_ID)
-        c->lastinteraction = server.unixtime;
+        c->lastinteraction = c->running_tid == IOTHREAD_MAIN_THREAD_ID ?
+                             server.unixtime : atomicUnixTime();
     else
         /* Avoid contention with genRedisInfoString as it can access master
          * client's data. If this is a master running in IO thread the value of
          * c->lastinteraction will be updated during processClientsFromIOThread */
-        c->io_lastinteraction = server.unixtime;
+        c->io_lastinteraction = atomicUnixTime();
 
     if (c->flags & CLIENT_MASTER) {
         if (c->running_tid == IOTHREAD_MAIN_THREAD_ID) {

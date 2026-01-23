@@ -1305,7 +1305,10 @@ static inline void updateCachedTimeWithUs(int update_daylight_info, const long l
     server.ustime = ustime;
     server.mstime = server.ustime / 1000;
     time_t unixtime = server.mstime / 1000;
-    atomicSet(server.unixtime, unixtime);
+    if (server.unixtime != unixtime) {
+        server.unixtime = unixtime;
+        atomicSet(server.atomic_unixtime, unixtime);
+    }
 
     /* To get information about daylight saving time, we need to call
      * localtime_r and cache the result. However calling localtime_r in this
