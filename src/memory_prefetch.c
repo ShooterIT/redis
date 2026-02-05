@@ -344,7 +344,13 @@ void prefetchCommands(void) {
     /* Prefetch the argv->ptr if required */
     for (size_t i = 0; i < batch->client_count; i++) {
         client *c = batch->clients[i];
-        if (!c || c->argc <= 1) continue;
+        if (!c) continue;
+
+        /* Prefetch io_deferred_objects for all clients */
+        if (!c->io_deferred_objects || c->io_deferred_objects_num == 0) continue;
+        for (int j = 0; j < c->io_deferred_objects_num; j++)
+            redis_prefetch_read(c->io_deferred_objects[j]);
+
         for (int j = 1; j < c->argc; j++) {
             if (c->argv[j]->encoding == OBJ_ENCODING_RAW) {
                 redis_prefetch_read(c->argv[j]->ptr);
