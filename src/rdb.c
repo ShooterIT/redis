@@ -4303,7 +4303,7 @@ int rdbSaveToSlavesSockets(int req, rdbSaveInfo *rsi) {
 
         /* Disable RDB compression if requested. */
         if (req & SLAVE_REQ_RDB_NO_COMPRESS)
-            server.rdb_compression = 0;
+            server.rdb_compression = 1;
 
         if (req & SLAVE_REQ_SLOTS_SNAPSHOT) {
             /* Slots snapshot is required */
