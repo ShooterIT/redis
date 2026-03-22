@@ -1642,6 +1642,79 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter, unsigned 
     if ((res = rdbSaveLen(rdb,expires_size)) < 0) goto werr;
     written += res;
 
+#if defined(USE_JEMALLOC)
+    /* In fork child process, iterate by arena group so we can free keys
+     * and purge each arena immediately after its slots are dumped.
+     * This releases physical pages incrementally, reducing COW overhead. */
+    if (server.in_fork_child) {
+        int num_slots = kvstoreNumDicts(db->keys);
+        for (int arena_idx = 0; arena_idx < KV_ARENA_COUNT; arena_idx++) {
+            for (int slot = arena_idx; slot < num_slots; slot += KV_ARENA_COUNT) {
+                if (kvstoreDictSize(db->keys, slot) == 0) continue;
+
+                /* Skip slots that are being trimmed */
+                if (server.cluster_enabled && isSlotInTrimJob(slot)) {
+                    *skipped += kvstoreDictSize(db->keys, slot);
+                    continue;
+                }
+
+                /* Save slot info. */
+                if (server.cluster_enabled) {
+                    if ((res = rdbSaveType(rdb, RDB_OPCODE_SLOT_INFO)) < 0) goto werr;
+                    written += res;
+                    if ((res = rdbSaveLen(rdb, slot)) < 0) goto werr;
+                    written += res;
+                    if ((res = rdbSaveLen(rdb, kvstoreDictSize(db->keys, slot))) < 0) goto werr;
+                    written += res;
+                    if ((res = rdbSaveLen(rdb, kvstoreDictSize(db->expires, slot))) < 0) goto werr;
+                    written += res;
+                }
+
+                /* Dump all keys in this slot (read-only, no COW from child). */
+                kvstoreDictIterator kvs_di;
+                kvstoreInitDictIterator(&kvs_di, db->keys, slot);
+                while ((de = kvstoreDictIteratorNext(&kvs_di)) != NULL) {
+                    kvobj *kv = dictGetKV(de);
+                    robj key;
+                    long long expire;
+
+                    initStaticStringObject(key, kvobjGetKey(kv));
+                    expire = kvobjGetExpire(kv);
+                    res = rdbSaveKeyValuePair(rdb, &key, kv, expire, dbid);
+                    if (res < 0) {
+                        kvstoreResetDictIterator(&kvs_di);
+                        goto werr;
+                    }
+                    written += res;
+
+                    if (((*key_counter)++ & 1023) == 0) {
+                        long long now = mstime();
+                        if (now - info_updated_time >= 1000) {
+                            sendChildInfo(CHILD_INFO_TYPE_CURRENT_INFO, *key_counter, pname);
+                            info_updated_time = now;
+                        }
+                    }
+                }
+                kvstoreResetDictIterator(&kvs_di);
+            }
+            /* All slots for this arena are dumped. Now batch-free all keys
+             * to mark arena pages as dirty, then purge to release them.
+             * Switch to the KV arena+tcache first so that dallocx routes
+             * freed objects into the correct tcache, allowing purge to
+             * reclaim the physical pages effectively. */
+            kvArenaSwitchToSlot(arena_idx);
+            for (int slot = arena_idx; slot < num_slots; slot += KV_ARENA_COUNT) {
+                dict *d = kvstoreGetDict(db->keys, slot);
+                if (d) dictEmpty(d, NULL);
+            }
+            kvArenaRestore();
+            kvArenaPurge(arena_idx);
+        }
+        return written;
+    }
+#endif
+
+    /* Normal path: sequential iteration (non-fork or no jemalloc). */
     kvstoreIteratorInit(&kvs_it, db->keys);
     int last_slot = -1;
     /* Iterate this DB writing every entry */
@@ -3716,6 +3789,11 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
     int error;
     long long empty_keys_skipped = 0;
 
+#if defined(USE_JEMALLOC)
+    int current_slot = -1; /* Track slot for arena switching during load. */
+    int saved_arena_flags = zmalloc_arena_flags;
+#endif
+
     rdb->update_cksum = rdbLoadProgressCallback;
     rdb->max_processing_chunk = server.loading_process_events_interval_bytes;
     if (rioRead(rdb,buf,9) == 0) goto eoferr;
@@ -3811,6 +3889,12 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             kvstoreDictExpand(db->keys, slot_id, slot_size);
             kvstoreDictExpand(db->expires, slot_id, expires_slot_size);
             should_expand_db = 0;
+#if defined(USE_JEMALLOC)
+            /* Switch to the KV arena for this slot so that subsequent
+             * key/value allocations land in the correct arena. */
+            current_slot = (int)slot_id;
+            kvArenaSwitchToSlot(current_slot);
+#endif
             continue; /* Read next opcode. */
         } else if (type == RDB_OPCODE_AUX) {
             /* AUX: generic string-string fields. Use to add state to RDB
@@ -3961,6 +4045,15 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             keyMetaSpecCleanup(&keyMeta);
             goto eoferr;
         }
+#if defined(USE_JEMALLOC)
+        /* If no SLOT_INFO marker was seen (non-cluster or legacy RDB),
+         * compute the slot from the key name and switch arena before
+         * loading the value (which is the bulk of memory). */
+        if (current_slot < 0) {
+            int slot = getKeySlot(key);
+            kvArenaSwitchToSlot(slot);
+        }
+#endif
         /* Read value */
         val = rdbLoadObject(type,rdb,key,db->id,&error);
 
@@ -4087,6 +4180,11 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             }
         }
     }
+
+#if defined(USE_JEMALLOC)
+    /* Restore arena flags to whatever they were before loading. */
+    zmalloc_arena_flags = saved_arena_flags;
+#endif
 
     if (empty_keys_skipped) {
         serverLog(LL_NOTICE,

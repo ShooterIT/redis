@@ -569,6 +569,7 @@ int performEvictions(void) {
         static unsigned int next_db = 0;
         sds bestkey = NULL;
         int bestdbid;
+        int bestslot = -1;
         redisDb *db;
         dictEntry *de;
 
@@ -640,6 +641,7 @@ int performEvictions(void) {
                      * a ghost and we need to try the next element. */
                     if (de) {
                         bestkey = kvobjGetKey(dictGetKV(de));
+                        bestslot = pool[k].slot;
                         break;
                     } else {
                         /* Ghost... Iterate again. */
@@ -671,6 +673,7 @@ int performEvictions(void) {
                     kvobj *kv = dictGetKV(de);
                     bestkey = kvobjGetKey(kv);
                     bestdbid = j;
+                    bestslot = slot;
                     break;
                 }
             }
@@ -681,6 +684,11 @@ int performEvictions(void) {
             long long key_mem_freed;
             db = server.db+bestdbid;
 
+#if defined(USE_JEMALLOC)
+            /* Switch to the KV arena for this slot so that freeing the
+             * evicted key's memory goes back to the correct arena/tcache. */
+            if (bestslot >= 0) kvArenaSwitchToSlot(bestslot);
+#endif
             enterExecutionUnit(1, 0);
             robj *keyobj = createStringObject(bestkey,sdslen(bestkey));
             deleteEvictedKeyAndPropagate(db, keyobj, &key_mem_freed);
@@ -688,6 +696,9 @@ int performEvictions(void) {
             exitExecutionUnit();
             /* Propagate the DEL command */
             postExecutionUnitOperations();
+#if defined(USE_JEMALLOC)
+            if (bestslot >= 0) kvArenaRestore();
+#endif
 
             mem_freed += key_mem_freed;
             keys_freed++;

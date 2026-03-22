@@ -4498,6 +4498,17 @@ static inline const char *redactLogCstr(const char *s) {
 
 int iAmMaster(void);
 
+/* Arena-based KV memory isolation for reducing COW overhead in child processes.
+ * Uses je_mallctl("thread.arena") to switch the thread's default arena,
+ * preserving jemalloc's malloc() fast path (tcache). */
+#if defined(USE_JEMALLOC)
+#define KV_ARENA_COUNT 16
+void kvArenaInit(void);
+void kvArenaSwitchToSlot(int slot);
+void kvArenaRestore(void);
+void kvArenaPurge(int arena_idx);
+#endif
+
 #define STRINGIFY_(x) #x
 #define STRINGIFY(x) STRINGIFY_(x)
 

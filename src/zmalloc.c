@@ -158,6 +158,10 @@ static void zmalloc_default_oom(size_t size) {
 
 static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 
+#if defined(USE_JEMALLOC)
+__thread int zmalloc_arena_flags = 0;
+#endif
+
 #ifdef HAVE_MALLOC_SIZE
 void *extend_to_usable(void *ptr, size_t size) {
     UNUSED(size);
@@ -170,6 +174,16 @@ void *extend_to_usable(void *ptr, size_t size) {
 static inline void *ztrymalloc_usable_internal(size_t size, size_t *usable) {
     /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
     if (size >= SIZE_MAX/2) return NULL;
+#if defined(USE_JEMALLOC)
+    if (zmalloc_arena_flags) {
+        void *ptr = mallocx(MALLOC_MIN_SIZE(size)+PREFIX_SIZE, zmalloc_arena_flags);
+        if (!ptr) return NULL;
+        size = zmalloc_size(ptr);
+        update_zmalloc_stat_alloc(size);
+        if (usable) *usable = size;
+        return ptr;
+    }
+#endif
 #ifdef HAVE_ALLOC_WITH_USIZE
     void *ptr = malloc_with_usize(MALLOC_MIN_SIZE(size)+PREFIX_SIZE, &size);
 #else
@@ -301,6 +315,16 @@ void zfree_no_tcache(void *ptr) {
 static inline void *ztrycalloc_usable_internal(size_t size, size_t *usable) {
     /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
     if (size >= SIZE_MAX/2) return NULL;
+#if defined(USE_JEMALLOC)
+    if (zmalloc_arena_flags) {
+        void *ptr = mallocx(MALLOC_MIN_SIZE(size)+PREFIX_SIZE, zmalloc_arena_flags | MALLOCX_ZERO);
+        if (!ptr) return NULL;
+        size = zmalloc_size(ptr);
+        update_zmalloc_stat_alloc(size);
+        if (usable) *usable = size;
+        return ptr;
+    }
+#endif
 #ifdef HAVE_ALLOC_WITH_USIZE
     void *ptr = calloc_with_usize(1, MALLOC_MIN_SIZE(size)+PREFIX_SIZE, &size);
 #else
@@ -409,6 +433,23 @@ static inline void *ztryrealloc_usable_internal(void *ptr, size_t size, size_t *
         *old_usable = oldsize;
         return NULL;
     }
+#if defined(USE_JEMALLOC)
+    if (zmalloc_arena_flags) {
+        oldsize = zmalloc_size(ptr);
+        newptr = rallocx(ptr, size, zmalloc_arena_flags);
+        if (newptr == NULL) {
+            *usable = 0;
+            *old_usable = oldsize;
+            return NULL;
+        }
+        update_zmalloc_stat_free(oldsize);
+        size = zmalloc_size(newptr);
+        update_zmalloc_stat_alloc(size);
+        *usable = size;
+        *old_usable = oldsize;
+        return newptr;
+    }
+#endif
 #ifdef HAVE_ALLOC_WITH_USIZE
     newptr = realloc_with_usize(ptr, size, &oldsize, &size);
     if (newptr == NULL) {
@@ -509,6 +550,13 @@ size_t zmalloc_usable_size(void *ptr) {
 void zfree(void *ptr) {
     if (ptr == NULL) return;
 
+#if defined(USE_JEMALLOC)
+    if (zmalloc_arena_flags) {
+        update_zmalloc_stat_free(zmalloc_size(ptr));
+        dallocx(ptr, zmalloc_arena_flags);
+        return;
+    }
+#endif
 #ifdef HAVE_ALLOC_WITH_USIZE
     size_t oldsize;
     free_with_usize(ptr, &oldsize);
@@ -537,6 +585,15 @@ void zfree_usable(void *ptr, size_t *usable) {
         return;
     }
 
+#if defined(USE_JEMALLOC)
+    if (zmalloc_arena_flags) {
+        oldsize = zmalloc_size(ptr);
+        update_zmalloc_stat_free(oldsize);
+        dallocx(ptr, zmalloc_arena_flags);
+        if (usable) *usable = oldsize;
+        return;
+    }
+#endif
 #ifdef HAVE_ALLOC_WITH_USIZE
     free_with_usize(ptr, &oldsize);
     update_zmalloc_stat_free(oldsize);

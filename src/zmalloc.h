@@ -127,6 +127,12 @@ void zlibc_free(void *ptr);
 void zmadvise_dontneed(void *ptr);
 
 #if defined(USE_JEMALLOC)
+/* Thread-local arena+tcache flags for KV data isolation.
+ * When non-zero, zmalloc/zcalloc/zrealloc route through mallocx/rallocx
+ * with these flags (MALLOCX_ARENA | MALLOCX_TCACHE).
+ * When zero (default), the standard malloc fast path is used. */
+extern __thread int zmalloc_arena_flags;
+
 void *zmalloc_with_flags(size_t size, int flags);
 void *zrealloc_with_flags(void *ptr, size_t size, int flags);
 void zfree_with_flags(void *ptr, int flags);
