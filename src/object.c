@@ -1113,6 +1113,8 @@ size_t stringObjectAllocSize(const robj *o) {
     } else if(o->encoding == OBJ_ENCODING_EMBSTR) {
         /* Value already counted (Value embedded in the object as well) */
         return 0;
+    } else if(o->encoding == OBJ_ENCODING_COMPRESSED) {
+        return sdsAllocSize(o->ptr);
     } else {
         serverPanic("Unknown string encoding");
     }
