@@ -494,6 +494,13 @@ ssize_t rdbSaveStringObject(rio *rdb, robj *obj) {
      * object is already integer encoded. */
     if (obj->encoding == OBJ_ENCODING_INT) {
         return rdbSaveLongLongAsStringObject(rdb,(long)obj->ptr);
+    } else if (obj->encoding == OBJ_ENCODING_COMPRESSED) {
+        /* Decompress before saving to RDB for backward compatibility.
+         * This runs in the fork child process, so no main-thread latency. */
+        robj *decoded = decompressStringObject(obj);
+        ssize_t ret = rdbSaveRawString(rdb, decoded->ptr, sdslen(decoded->ptr));
+        decrRefCount(decoded);
+        return ret;
     } else {
         serverAssertWithInfo(NULL,obj,sdsEncodedObject(obj));
         return rdbSaveRawString(rdb,obj->ptr,sdslen(obj->ptr));

@@ -821,15 +821,29 @@ static kvobj *lookupStringForBitCommand(client *c, uint64_t maxbit,
  *
  * If the source object is NULL the function is guaranteed to return NULL
  * and set 'len' to 0. */
-unsigned char *getObjectReadOnlyString(robj *o, long *len, char *llbuf) {
+unsigned char *getObjectReadOnlyString(robj *o, long *len, char *llbuf, robj **decoded_out) {
     serverAssert(!o || o->type == OBJ_STRING);
     unsigned char *p = NULL;
+    if (decoded_out) *decoded_out = NULL;
 
     /* Set the 'p' pointer to the string, that can be just a stack allocated
      * array if our string was integer encoded. */
     if (o && o->encoding == OBJ_ENCODING_INT) {
         p = (unsigned char*) llbuf;
         if (len) *len = ll2string(llbuf,LONG_STR_SIZE,(long)o->ptr);
+    } else if (o && o->encoding == OBJ_ENCODING_COMPRESSED) {
+        robj *decoded = decompressStringObject(o);
+        p = (unsigned char*) decoded->ptr;
+        if (len) *len = sdslen(decoded->ptr);
+        if (decoded_out) {
+            *decoded_out = decoded;
+        } else {
+            /* Caller didn't provide decoded_out — they must not use the returned
+             * pointer beyond this point since we're freeing the backing object.
+             * This should only happen for callers that know the object is never
+             * compressed (e.g., stream field/value objects). */
+            serverPanic("getObjectReadOnlyString called with compressed object but NULL decoded_out");
+        }
     } else if (o) {
         p = (unsigned char*) o->ptr;
         if (len) *len = sdslen(o->ptr);
@@ -910,6 +924,11 @@ void getbitCommand(client *c) {
     if (sdsEncodedObject(kv)) {
         if (byte < sdslen(kv->ptr))
             bitval = ((uint8_t*)kv->ptr)[byte] & (1 << bit);
+    } else if (kv->encoding == OBJ_ENCODING_COMPRESSED) {
+        robj *decoded = decompressStringObject(kv);
+        if (byte < sdslen(decoded->ptr))
+            bitval = ((uint8_t*)decoded->ptr)[byte] & (1 << bit);
+        decrRefCount(decoded);
     } else {
         if (byte < (size_t)ll2string(llbuf,sizeof(llbuf),(long)kv->ptr))
             bitval = llbuf[byte] & (1 << bit);
@@ -1622,6 +1641,7 @@ void bitcountCommand(client *c) {
     char llbuf[LONG_STR_SIZE];
     int isbit = 0;
     unsigned char first_byte_neg_mask = 0, last_byte_neg_mask = 0;
+    robj *decoded_tmp = NULL;
 
     /* Parse start/end range if any. */
     if (c->argc == 4 || c->argc == 5) {
@@ -1640,7 +1660,7 @@ void bitcountCommand(client *c) {
         /* Lookup, check for type. */
         o = lookupKeyRead(c->db, c->argv[1]);
         if (checkType(c, o, OBJ_STRING)) return;
-        p = getObjectReadOnlyString(o,&strlen,llbuf);
+        p = getObjectReadOnlyString(o,&strlen,llbuf,&decoded_tmp);
         long long totlen = strlen;
 
         /* Make sure we will not overflow */
@@ -1648,6 +1668,7 @@ void bitcountCommand(client *c) {
 
         /* Convert negative indexes */
         if (start < 0 && end < 0 && start > end) {
+            if (decoded_tmp) decrRefCount(decoded_tmp);
             addReply(c,shared.czero);
             return;
         }
@@ -1669,7 +1690,7 @@ void bitcountCommand(client *c) {
         /* Lookup, check for type. */
         o = lookupKeyRead(c->db, c->argv[1]);
         if (checkType(c, o, OBJ_STRING)) return;
-        p = getObjectReadOnlyString(o,&strlen,llbuf);
+        p = getObjectReadOnlyString(o,&strlen,llbuf,&decoded_tmp);
         /* The whole string. */
         start = 0;
         end = strlen-1;
@@ -1681,6 +1702,7 @@ void bitcountCommand(client *c) {
 
     /* Return 0 for non existing keys. */
     if (o == NULL) {
+        if (decoded_tmp) decrRefCount(decoded_tmp);
         addReply(c, shared.czero);
         return;
     }
@@ -1709,6 +1731,7 @@ void bitcountCommand(client *c) {
         }
         addReplyLongLong(c,count);
     }
+    if (decoded_tmp) decrRefCount(decoded_tmp);
 }
 
 /* BITPOS key bit [start [end [BIT|BYTE]]] */
@@ -1720,6 +1743,7 @@ void bitposCommand(client *c) {
     char llbuf[LONG_STR_SIZE];
     int isbit = 0, end_given = 0;
     unsigned char first_byte_neg_mask = 0, last_byte_neg_mask = 0;
+    robj *decoded_tmp = NULL;
 
     /* Parse the bit argument to understand what we are looking for, set
      * or clear bits. */
@@ -1751,7 +1775,7 @@ void bitposCommand(client *c) {
         /* Lookup, check for type. */
         o = lookupKeyRead(c->db, c->argv[1]);
         if (checkType(c, o, OBJ_STRING)) return;
-        p = getObjectReadOnlyString(o, &strlen, llbuf);
+        p = getObjectReadOnlyString(o, &strlen, llbuf, &decoded_tmp);
 
         /* Make sure we will not overflow */
         long long totlen = strlen;
@@ -1781,7 +1805,7 @@ void bitposCommand(client *c) {
         /* Lookup, check for type. */
         o = lookupKeyRead(c->db, c->argv[1]);
         if (checkType(c,o,OBJ_STRING)) return;
-        p = getObjectReadOnlyString(o,&strlen,llbuf);
+        p = getObjectReadOnlyString(o,&strlen,llbuf,&decoded_tmp);
 
         /* The whole string. */
         start = 0;
@@ -1796,6 +1820,7 @@ void bitposCommand(client *c) {
      * array of 0 bits. If the user is looking for the first clear bit return 0,
      * If the user is looking for the first set bit, return -1. */
     if (o == NULL) {
+        if (decoded_tmp) decrRefCount(decoded_tmp);
         addReplyLongLong(c, bit ? -1 : 0);
         return;
     }
@@ -1844,12 +1869,14 @@ void bitposCommand(client *c) {
          * we return -1 to the caller, to mean, in the specified range there
          * is not a single "0" bit. */
         if (end_given && bit == 0 && pos == (long long)bytes<<3) {
+            if (decoded_tmp) decrRefCount(decoded_tmp);
             addReplyLongLong(c,-1);
             return;
         }
         if (pos != -1) pos += (long long)start<<3; /* Adjust for the bytes we skipped. */
         addReplyLongLong(c,pos);
     }
+    if (decoded_tmp) decrRefCount(decoded_tmp);
 }
 
 /* BITFIELD key subcommand-1 arg ... subcommand-2 arg ... subcommand-N ...
@@ -2071,9 +2098,10 @@ void bitfieldGeneric(client *c, int flags) {
             long strlen = 0;
             unsigned char *src = NULL;
             char llbuf[LONG_STR_SIZE];
+            robj *decoded_tmp = NULL;
 
             if (o != NULL)
-                src = getObjectReadOnlyString(o,&strlen,llbuf);
+                src = getObjectReadOnlyString(o,&strlen,llbuf,&decoded_tmp);
 
             /* For GET we use a trick: before executing the operation
              * copy up to 9 bytes to a local buffer, so that we can easily
@@ -2086,6 +2114,7 @@ void bitfieldGeneric(client *c, int flags) {
                 if (src == NULL || i+byte >= (uint64_t)strlen) break;
                 buf[i] = src[i+byte];
             }
+            if (decoded_tmp) decrRefCount(decoded_tmp);
 
             /* Now operate on the copied buffer which is guaranteed
              * to be zero-padded. */

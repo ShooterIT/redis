@@ -115,8 +115,14 @@ static size_t reqresAppendEncodedBuffer(client *c, char *buf, size_t len) {
 
             /* Append prefix: "$<len>\r\n" */
             ret += reqresAppendBuffer(c, str_ref->prefix, str_ref->prefix_cnt);
-            /* Append string content */
-            ret += reqresAppendBuffer(c, str_ref->obj->ptr, sdslen(str_ref->obj->ptr));
+            /* Append string content - decompress if needed */
+            if (str_ref->obj->encoding == OBJ_ENCODING_COMPRESSED) {
+                robj *decoded = decompressStringObject(str_ref->obj);
+                ret += reqresAppendBuffer(c, decoded->ptr, sdslen(decoded->ptr));
+                decrRefCount(decoded);
+            } else {
+                ret += reqresAppendBuffer(c, str_ref->obj->ptr, sdslen(str_ref->obj->ptr));
+            }
             /* Append trailing CRLF */
             ret += reqresAppendBuffer(c, str_ref->crlf, 2);
         }

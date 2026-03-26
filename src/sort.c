@@ -531,6 +531,16 @@ void sortCommandGeneric(client *c, int readonly) {
                      * integer-encoded (the only encoding supported) so
                      * far. We can just cast it */
                     vector[j].u.score = (long)byval->ptr;
+                } else if (byval->encoding == OBJ_ENCODING_COMPRESSED) {
+                    robj *decoded = decompressStringObject(byval);
+                    char *eptr;
+                    vector[j].u.score = fast_float_strtod(decoded->ptr,&eptr);
+                    if (eptr[0] != '\0' || errno == ERANGE ||
+                        isnan(vector[j].u.score))
+                    {
+                        int_conversion_error = 1;
+                    }
+                    decrRefCount(decoded);
                 } else {
                     serverAssertWithInfo(c,sortval,1 != 1);
                 }

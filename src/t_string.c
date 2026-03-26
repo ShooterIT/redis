@@ -175,14 +175,30 @@ void setGenericCommand(client *c, int flags, robj *key, robj **valref, robj *exp
     setkey_flags |= ((flags & OBJ_KEEPTTL) || expire) ? SETKEY_KEEPTTL : 0;
     setkey_flags |= found ? SETKEY_ALREADY_EXIST : SETKEY_DOESNT_EXIST;
 
-    setKeyByLink(c, c->db, key, valref, setkey_flags, &link);
-    /* If there's an expiration, setExpireByLink may reallocate the object.
-     * We must update valref to reflect the new object if that happens. */
-    if (expire) *valref = setExpireByLink(c, c->db, key->ptr, milliseconds, link);
-    /* The client still holds a reference to the original object via c->argv[i],
-     * and will call decrRefCount() at the end of call(). We increment the refcount
-     * from 1 to 2 to ensure both DB and client have valid references. */
-    incrRefCount(*valref); /* 1->2 */
+    /* IO thread compression: if the IO thread produced a compressed version,
+     * store it in the DB instead of the raw value. Keep c->argv unmodified
+     * so that command propagation (AOF/replication) uses uncompressed data. */
+    pendingCommand *pcmd = c->current_pending_cmd;
+    if (pcmd && pcmd->compressed_value) {
+        robj *db_val = pcmd->compressed_value;
+        setKeyByLink(c, c->db, key, &db_val, setkey_flags, &link);
+        if (expire) db_val = setExpireByLink(c, c->db, key->ptr, milliseconds, link);
+        /* compressed_value robj was consumed by kvobjSet inside dbSetValue.
+         * Set to NULL so freePendingCommand doesn't double-free. */
+        pcmd->compressed_value = NULL;
+        /* db_val (kvobj) has refcount=1 held by the DB.
+         * c->argv[2] still points to the original uncompressed robj (refcount=1),
+         * which will be freed during command cleanup. No extra incrRefCount needed. */
+    } else {
+        setKeyByLink(c, c->db, key, valref, setkey_flags, &link);
+        /* If there's an expiration, setExpireByLink may reallocate the object.
+         * We must update valref to reflect the new object if that happens. */
+        if (expire) *valref = setExpireByLink(c, c->db, key->ptr, milliseconds, link);
+        /* The client still holds a reference to the original object via c->argv[i],
+         * and will call decrRefCount() at the end of call(). We increment the refcount
+         * from 1 to 2 to ensure both DB and client have valid references. */
+        incrRefCount(*valref); /* 1->2 */
+    }
 
     server.dirty++;
     notifyKeyspaceEvent(NOTIFY_STRING,"set",key,c->db->id);
@@ -660,9 +676,14 @@ void getrangeCommand(client *c) {
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptybulk)) == NULL ||
         checkType(c,o,OBJ_STRING)) return;
 
+    robj *decoded = NULL;
     if (o->encoding == OBJ_ENCODING_INT) {
         str = llbuf;
         strlen = ll2string(llbuf,sizeof(llbuf),(long)o->ptr);
+    } else if (o->encoding == OBJ_ENCODING_COMPRESSED) {
+        decoded = decompressStringObject(o);
+        str = decoded->ptr;
+        strlen = sdslen(str);
     } else {
         str = o->ptr;
         strlen = sdslen(str);
@@ -670,6 +691,7 @@ void getrangeCommand(client *c) {
 
     /* Convert negative indexes */
     if (start < 0 && end < 0 && start > end) {
+        if (decoded) decrRefCount(decoded);
         addReply(c,shared.emptybulk);
         return;
     }
@@ -686,6 +708,7 @@ void getrangeCommand(client *c) {
     } else {
         addReplyBulkCBuffer(c,(char*)str+start,end-start+1);
     }
+    if (decoded) decrRefCount(decoded);
 }
 
 void mgetCommand(client *c) {
@@ -1213,6 +1236,10 @@ sds stringDigest(robj *o) {
         char buf[LONG_STR_SIZE];
         size_t len = ll2string(buf,sizeof(buf),(long)o->ptr);
         hash = XXH3_64bits(buf, len);
+    } else if (o->encoding == OBJ_ENCODING_COMPRESSED) {
+        robj *decoded = decompressStringObject(o);
+        hash = XXH3_64bits(decoded->ptr, sdslen(decoded->ptr));
+        decrRefCount(decoded);
     } else {
         serverPanic("Wrong obj->encoding stringDigest()");
     }

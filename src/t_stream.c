@@ -5830,7 +5830,7 @@ static int createIdempotencyHash(robj **argv, int64_t numfields, XXH128_hash_t *
         
         /* Hash the field */
         long field_len;
-        unsigned char *field_data = getObjectReadOnlyString(field, &field_len, llbuf);
+        unsigned char *field_data = getObjectReadOnlyString(field, &field_len, llbuf, NULL);
         err = XXH3_128bits_update(state, field_data, field_len);
         if (err != XXH_OK) goto cleanup;
         
@@ -5840,7 +5840,7 @@ static int createIdempotencyHash(robj **argv, int64_t numfields, XXH128_hash_t *
         
         /* Hash the value */
         long value_len;
-        unsigned char *value_data = getObjectReadOnlyString(value, &value_len, llbuf);
+        unsigned char *value_data = getObjectReadOnlyString(value, &value_len, llbuf, NULL);
         err = XXH3_128bits_update(state, value_data, value_len);
         if (err != XXH_OK) goto cleanup;
         

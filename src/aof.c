@@ -1908,6 +1908,13 @@ int rioWriteBulkObject(rio *r, robj *obj) {
      * in a child process when this function is called). */
     if (obj->encoding == OBJ_ENCODING_INT) {
         return rioWriteBulkLongLong(r,(long)obj->ptr);
+    } else if (obj->encoding == OBJ_ENCODING_COMPRESSED) {
+        /* Decompress before writing to AOF for backward compatibility.
+         * This runs in the fork child process, so no main-thread latency. */
+        robj *decoded = decompressStringObject(obj);
+        int ret = rioWriteBulkString(r, decoded->ptr, sdslen(decoded->ptr));
+        decrRefCount(decoded);
+        return ret;
     } else if (sdsEncodedObject(obj)) {
         return rioWriteBulkString(r,obj->ptr,sdslen(obj->ptr));
     } else {

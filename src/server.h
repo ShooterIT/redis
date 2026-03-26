@@ -1100,6 +1100,7 @@ static_assert(offsetof(payloadHeader, payload_len) == 0, "payload_len must be at
  * we store pointers to object and string itself */
 typedef struct __attribute__((__packed__)) bulkStrRef {
     robj *obj; /* pointer to object used for reference count management */
+    sds decompressed_cache; /* Decompressed data for OBJ_ENCODING_COMPRESSED objects (IO thread use) */
     unsigned int prefix_cnt;
     char prefix[LONG_STR_SIZE + 3]; /* $<len>\r\n */
     char crlf[2]; /* \r\n */
@@ -2624,6 +2625,7 @@ struct pendingCommand {
     int slot;         /* The slot the command is executing against. Set to INVALID_CLUSTER_SLOT
                        * if no slot is being used or if the command has a cross slot error */
     uint8_t read_error;
+    robj *compressed_value;    /* Compressed value for SET commands (IO thread compression) */
 
     struct pendingCommand *next;
     struct pendingCommand *prev;
@@ -3344,7 +3346,7 @@ void discardTransaction(client *c);
 void flagTransaction(client *c);
 void execCommandAbort(client *c, sds error);
 
-unsigned char *getObjectReadOnlyString(robj *o, long *len, char *llbuf);
+unsigned char *getObjectReadOnlyString(robj *o, long *len, char *llbuf, robj **decoded_out);
 
 unsigned long long estimateObjectIdleTime(robj *o);
 #define sdsEncodedObject(objptr) (objptr->encoding == OBJ_ENCODING_RAW || objptr->encoding == OBJ_ENCODING_EMBSTR)

@@ -15,6 +15,7 @@
 #include "functions.h"
 #include "intset.h"  /* Compact integer set structure */
 #include "cluster_asm.h"
+#include "lzf.h"
 #include <math.h>
 #include <ctype.h>
 
@@ -306,7 +307,8 @@ kvobj *kvobjSet(sds key, robj *val, uint32_t keyMetaBits) {
             /* The pointer is not allocated memory. We can just copy the pointer. */
             valptr = val->ptr;
         } else if (val->type == OBJ_STRING &&
-                   val->encoding == OBJ_ENCODING_RAW) {
+                   (val->encoding == OBJ_ENCODING_RAW ||
+                    val->encoding == OBJ_ENCODING_COMPRESSED)) {
             /* Dup the string. */
             valptr = sdsdup(val->ptr);
         } else {
@@ -522,7 +524,7 @@ robj *createModuleObject(moduleType *mt, void *value) {
 }
 
 void freeStringObject(robj *o) {
-    if (o->encoding == OBJ_ENCODING_RAW) {
+    if (o->encoding == OBJ_ENCODING_RAW || o->encoding == OBJ_ENCODING_COMPRESSED) {
         sdsfree(o->ptr);
     }
 }
@@ -933,6 +935,67 @@ size_t getObjectLength(robj *o) {
     }
 }
 
+/* Try to compress a string object using LZF. Returns a new robj with
+ * OBJ_ENCODING_COMPRESSED if compression is worthwhile, or NULL if the
+ * object is too small or not compressible enough.
+ *
+ * Compressed SDS layout: [8 bytes: uint64_t original_len][compressed data...]
+ * The sdslen() of the compressed SDS = 8 + compressed_size.
+ */
+robj *tryCompressStringObject(robj *o) {
+    serverAssert(o->type == OBJ_STRING);
+
+    /* Only compress SDS-encoded strings */
+    if (!sdsEncodedObject(o)) return NULL;
+
+    size_t len = sdslen(o->ptr);
+
+    /* Don't compress small strings - LZF can't compress well under ~20 bytes */
+    if (len <= OBJ_ENCODING_EMBSTR_SIZE_LIMIT) return NULL;
+
+    /* Allocate output buffer: max compressed size is len-1 (we want savings) */
+    size_t outlen = len - 1;
+    void *out = zmalloc(outlen + 1);
+
+    size_t comprlen = lzf_compress(o->ptr, len, out, outlen);
+    if (comprlen == 0) {
+        /* Compression failed or no savings */
+        zfree(out);
+        return NULL;
+    }
+
+    /* Build compressed SDS: [8 bytes original_len][compressed data] */
+    sds compressed_sds = sdsnewlen(SDS_NOINIT, 8 + comprlen);
+    *(uint64_t *)compressed_sds = (uint64_t)len;
+    memcpy(compressed_sds + 8, out, comprlen);
+    zfree(out);
+
+    robj *comp = createObject(OBJ_STRING, compressed_sds);
+    comp->encoding = OBJ_ENCODING_COMPRESSED;
+    return comp;
+}
+
+/* Decompress a compressed string object. Returns a new robj with
+ * OBJ_ENCODING_RAW encoding containing the decompressed data.
+ * The caller is responsible for freeing the returned object. */
+robj *decompressStringObject(robj *o) {
+    serverAssert(o->type == OBJ_STRING && o->encoding == OBJ_ENCODING_COMPRESSED);
+
+    uint64_t original_len = *(uint64_t *)(o->ptr);
+    size_t compressed_len = sdslen(o->ptr) - 8;
+    char *compressed_data = (char *)o->ptr + 8;
+
+    sds decompressed = sdsnewlen(SDS_NOINIT, original_len);
+    size_t result = lzf_decompress(compressed_data, compressed_len,
+                                   decompressed, original_len);
+    if (result == 0) {
+        sdsfree(decompressed);
+        serverPanic("Failed to decompress LZF compressed string");
+    }
+
+    return createObject(OBJ_STRING, decompressed);
+}
+
 /* Get a decoded version of an encoded object (returned as a new object).
  * If the object is already raw-encoded just increment the ref count. */
 robj *getDecodedObject(robj *o) {
@@ -948,6 +1011,8 @@ robj *getDecodedObject(robj *o) {
         ll2string(buf,32,(long)o->ptr);
         dec = createStringObject(buf,strlen(buf));
         return dec;
+    } else if (o->type == OBJ_STRING && o->encoding == OBJ_ENCODING_COMPRESSED) {
+        return decompressStringObject(o);
     } else {
         serverPanic("Unknown encoding type");
     }
@@ -1030,6 +1095,9 @@ size_t stringObjectLen(robj *o) {
     serverAssertWithInfo(NULL,o,o->type == OBJ_STRING);
     if (sdsEncodedObject(o)) {
         return sdslen(o->ptr);
+    } else if (o->encoding == OBJ_ENCODING_COMPRESSED) {
+        /* Compressed SDS layout: [8 bytes: original_len][compressed data...] */
+        return *(uint64_t*)(o->ptr);
     } else {
         return sdigits10((long)o->ptr);
     }
@@ -1062,6 +1130,11 @@ int getDoubleFromObject(const robj *o, double *target) {
                 return C_ERR;
         } else if (o->encoding == OBJ_ENCODING_INT) {
             value = (long)o->ptr;
+        } else if (o->encoding == OBJ_ENCODING_COMPRESSED) {
+            robj *decoded = decompressStringObject(o);
+            int ret = string2d(decoded->ptr, sdslen(decoded->ptr), &value) ? C_OK : C_ERR;
+            decrRefCount(decoded);
+            if (ret != C_OK) return C_ERR;
         } else {
             serverPanic("Unknown string encoding");
         }
@@ -1096,6 +1169,11 @@ int getLongDoubleFromObject(robj *o, long double *target) {
                 return C_ERR;
         } else if (o->encoding == OBJ_ENCODING_INT) {
             value = (long)o->ptr;
+        } else if (o->encoding == OBJ_ENCODING_COMPRESSED) {
+            robj *decoded = decompressStringObject(o);
+            int ret = string2ld(decoded->ptr, sdslen(decoded->ptr), &value) ? C_OK : C_ERR;
+            decrRefCount(decoded);
+            if (ret != C_OK) return C_ERR;
         } else {
             serverPanic("Unknown string encoding");
         }
@@ -1129,6 +1207,11 @@ int getLongLongFromObject(robj *o, long long *target) {
             if (string2ll(o->ptr,sdslen(o->ptr),&value) == 0) return C_ERR;
         } else if (o->encoding == OBJ_ENCODING_INT) {
             value = (long)o->ptr;
+        } else if (o->encoding == OBJ_ENCODING_COMPRESSED) {
+            robj *decoded = decompressStringObject(o);
+            int ret = string2ll(decoded->ptr, sdslen(decoded->ptr), &value) == 0 ? C_ERR : C_OK;
+            decrRefCount(decoded);
+            if (ret != C_OK) return C_ERR;
         } else {
             serverPanic("Unknown string encoding");
         }
@@ -1210,6 +1293,7 @@ char *strEncoding(int encoding) {
     case OBJ_ENCODING_SKIPLIST: return "skiplist";
     case OBJ_ENCODING_EMBSTR: return "embstr";
     case OBJ_ENCODING_STREAM: return "stream";
+    case OBJ_ENCODING_COMPRESSED: return "compressed";
     default: return "unknown";
     }
 }

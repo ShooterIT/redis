@@ -85,6 +85,7 @@ struct RedisModuleType;
 #define OBJ_ENCODING_STREAM 10 /* Encoded as a radix tree of listpacks */
 #define OBJ_ENCODING_LISTPACK 11 /* Encoded as a listpack */
 #define OBJ_ENCODING_LISTPACK_EX 12 /* Encoded as listpack, extended with metadata */
+#define OBJ_ENCODING_COMPRESSED 13 /* LZF compressed string encoding */
 
 #define LRU_BITS 24
 #define LRU_CLOCK_MAX ((1<<LRU_BITS)-1) /* Max value of obj->lru */
@@ -179,6 +180,9 @@ int collateStringObjects(const robj *a, const robj *b);
 int equalStringObjects(robj *a, robj *b);
 void trimStringObjectIfNeeded(robj *o, int trim_small_values);
 size_t kvobjAllocSize(kvobj *o);
+
+robj *tryCompressStringObject(robj *o);
+robj *decompressStringObject(robj *o);
 
 int objectSetLRUOrLFU(robj *val, long long lfu_freq, long long lru_idle,
                       long long lru_clock, int lru_multiplier);

@@ -22,6 +22,7 @@
 #include "cluster_asm.h"
 #include "memory_prefetch.h"
 #include "connection.h"
+#include "lzf.h"
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <math.h>
@@ -539,6 +540,7 @@ static void _addBulkStrRefToBufferOrList(client *c, robj *obj, size_t len) {
 
     bulkStrRef str_ref;
     str_ref.obj = obj;
+    str_ref.decompressed_cache = NULL;
     incrRefCount(obj); /* Refcount will be decremented in write handler */
 
     /* Fill prefix with bulk string length: "$<len>\r\n" */
@@ -1244,7 +1246,8 @@ static int isCopyAvoidPreferred(client *c, robj *obj, size_t len) {
      * to server.pending_push_messages when CLIENT_PUSHING is set. */
     if (c->flags & CLIENT_PUSHING) return 0;
 
-    if (obj->encoding != OBJ_ENCODING_RAW || obj->refcount >= OBJ_FIRST_SPECIAL_REFCOUNT) return 0;
+    if ((obj->encoding != OBJ_ENCODING_RAW && obj->encoding != OBJ_ENCODING_COMPRESSED) ||
+        obj->refcount >= OBJ_FIRST_SPECIAL_REFCOUNT) return 0;
 
     /* Copy avoidance is preferred for any string size starting certain number of I/O threads  */
     if (server.io_threads_num >= COPY_AVOID_MIN_IO_THREADS) return 1;
@@ -1272,7 +1275,19 @@ static int tryAvoidBulkStrCopyToReply(client *c, robj *obj, size_t len) {
 void addReplyBulkWithFlag(client *c, robj *obj, int avoid_copy) {
     if (_prepareClientToWrite(c) != C_OK) return;
 
-    if (sdsEncodedObject(obj)) {
+    if (obj->encoding == OBJ_ENCODING_COMPRESSED) {
+        /* For compressed objects, use the original (decompressed) length for
+         * the RESP bulk string prefix. The IO thread will decompress when writing. */
+        uint64_t original_len = *(uint64_t *)(obj->ptr);
+        if (avoid_copy && tryAvoidBulkStrCopyToReply(c, obj, original_len) == C_OK)
+            return;
+        /* Fallback: decompress in main thread if copy avoidance not available */
+        robj *decoded = decompressStringObject(obj);
+        _addReplyLongLongBulk(c, original_len);
+        _addReplyToBufferOrList(c, decoded->ptr, original_len);
+        _addReplyToBufferOrList(c, "\r\n", 2);
+        decrRefCount(decoded);
+    } else if (sdsEncodedObject(obj)) {
         const size_t len = sdslen(obj->ptr);
         if (avoid_copy && tryAvoidBulkStrCopyToReply(c, obj, len) == C_OK)
             return;
@@ -2018,6 +2033,11 @@ static void releaseBufReferences(client *c, char *buf, size_t bufpos) {
 
         if (header->payload_type == BULK_STR_REF) {
             bulkStrRef *str_ref = (bulkStrRef *)ptr;
+            /* Free decompressed cache if present */
+            if (str_ref->decompressed_cache) {
+                sdsfree(str_ref->decompressed_cache);
+                str_ref->decompressed_cache = NULL;
+            }
             /* Only release if not already released. */
             if (str_ref->obj != NULL) {
                 if (in_io_thread)
@@ -2368,7 +2388,30 @@ static void processEncodedBufferForWrite(ReplyIOV *reply_iov, char *start_ptr, c
             /* BULK_STR_REF - expand to prefix + string + crlf */
             bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
             size_t prefix_len = str_ref->prefix_cnt;
-            size_t str_len = sdslen(str_ref->obj->ptr);
+            char *str_data;
+            size_t str_len;
+
+            /* If the object is compressed, decompress in the IO thread.
+             * Cache the decompressed data in str_ref->decompressed_cache
+             * so that partial writes can resume without re-decompressing. */
+            if (str_ref->obj->encoding == OBJ_ENCODING_COMPRESSED) {
+                if (str_ref->decompressed_cache == NULL) {
+                    uint64_t original_len = *(uint64_t *)(str_ref->obj->ptr);
+                    size_t compressed_len = sdslen(str_ref->obj->ptr) - 8;
+                    char *compressed_data = (char *)str_ref->obj->ptr + 8;
+                    str_ref->decompressed_cache = sdsnewlen(SDS_NOINIT, original_len);
+                    size_t result = lzf_decompress(compressed_data, compressed_len,
+                                                   str_ref->decompressed_cache, original_len);
+                    if (result == 0) {
+                        serverPanic("Failed to decompress LZF compressed string in IO thread");
+                    }
+                }
+                str_data = str_ref->decompressed_cache;
+                str_len = sdslen(str_ref->decompressed_cache);
+            } else {
+                str_data = str_ref->obj->ptr;
+                str_len = sdslen(str_ref->obj->ptr);
+            }
 
             /* Add prefix */
             if (offset < prefix_len) {
@@ -2384,7 +2427,7 @@ static void processEncodedBufferForWrite(ReplyIOV *reply_iov, char *start_ptr, c
             /* Add string data */
             if (offset < str_len) {
                 if (replyIOVReachLimit(reply_iov)) return;
-                reply_iov->iov[reply_iov->iovcnt].iov_base = (char *)str_ref->obj->ptr + offset;
+                reply_iov->iov[reply_iov->iovcnt].iov_base = str_data + offset;
                 reply_iov->iov[reply_iov->iovcnt].iov_len = str_len - offset;
                 reply_iov->iov_bytes_len += reply_iov->iov[(reply_iov->iovcnt)++].iov_len;
                 offset = 0;
@@ -2429,13 +2472,26 @@ static payloadHeader *processSentDataInEncodedBuffer(client *c, char *start_ptr,
             /* BULK_STR_REF - release object references */
             bulkStrRef *str_ref = (bulkStrRef *)(ptr + sizeof(payloadHeader));
 
-            size_t writen_len = str_ref->prefix_cnt + sdslen(str_ref->obj->ptr) + 2;
+            /* For compressed objects, the written length is based on the
+             * decompressed (original) size, not the compressed sds length. */
+            size_t str_len;
+            if (str_ref->obj->encoding == OBJ_ENCODING_COMPRESSED) {
+                str_len = *(uint64_t *)(str_ref->obj->ptr);
+            } else {
+                str_len = sdslen(str_ref->obj->ptr);
+            }
+            size_t writen_len = str_ref->prefix_cnt + str_len + 2;
             if (*remaining < (ssize_t)(writen_len - *sentlen)) {
                 *sentlen += *remaining;
                 *remaining = 0;
                 return head;
             }
             *remaining -= (writen_len - *sentlen);
+            /* Free the decompressed cache if present */
+            if (str_ref->decompressed_cache) {
+                sdsfree(str_ref->decompressed_cache);
+                str_ref->decompressed_cache = NULL;
+            }
             if (in_io_thread) {
                 ioDeferFreeRobj(c, str_ref->obj);
             } else {
@@ -3666,6 +3722,24 @@ int processInputBuffer(client *c) {
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
+                /* IO thread compression: try to compress SET command values */
+                pendingCommand *pcmd = c->current_pending_cmd;
+                if (pcmd && pcmd->cmd && pcmd->argc >= 3 &&
+                    (pcmd->cmd->proc == setCommand ||
+                     pcmd->cmd->proc == setnxCommand ||
+                     pcmd->cmd->proc == setexCommand ||
+                     pcmd->cmd->proc == psetexCommand))
+                {
+                    /* For SET/SETNX the value is argv[2], for SETEX/PSETEX it's argv[3] */
+                    int val_idx = (pcmd->cmd->proc == setexCommand ||
+                                   pcmd->cmd->proc == psetexCommand) ? 3 : 2;
+                    if (val_idx < pcmd->argc) {
+                        robj *compressed = tryCompressStringObject(pcmd->argv[val_idx]);
+                        if (compressed) {
+                            pcmd->compressed_value = compressed;
+                        }
+                    }
+                }
                 c->io_flags |= CLIENT_IO_PENDING_COMMAND;
                 enqueuePendingClientsToMainThread(c, 0);
                 break;
@@ -5682,6 +5756,12 @@ void freePendingCommand(client *c, pendingCommand *pcmd) {
             serverAssert(c->all_argv_len_sum >= pcmd->argv_len_sum); /* assert this doesn't try to go negative */
             c->all_argv_len_sum -= pcmd->argv_len_sum;
         }
+    }
+
+    /* Free compressed value if it wasn't consumed by setGenericCommand */
+    if (pcmd->compressed_value) {
+        decrRefCount(pcmd->compressed_value);
+        pcmd->compressed_value = NULL;
     }
 
     zfree(pcmd);
