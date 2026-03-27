@@ -3722,21 +3722,24 @@ int processInputBuffer(client *c) {
              * execute the command here. All we can do is to flag the client
              * as one that needs to process the command. */
             if (c->running_tid != IOTHREAD_MAIN_THREAD_ID) {
-                /* IO thread compression: try to compress SET command values */
-                pendingCommand *pcmd = c->current_pending_cmd;
-                if (pcmd && pcmd->cmd && pcmd->argc >= 3 &&
-                    (pcmd->cmd->proc == setCommand ||
-                     pcmd->cmd->proc == setnxCommand ||
-                     pcmd->cmd->proc == setexCommand ||
-                     pcmd->cmd->proc == psetexCommand))
-                {
-                    /* For SET/SETNX the value is argv[2], for SETEX/PSETEX it's argv[3] */
-                    int val_idx = (pcmd->cmd->proc == setexCommand ||
-                                   pcmd->cmd->proc == psetexCommand) ? 3 : 2;
-                    if (val_idx < pcmd->argc) {
-                        robj *compressed = tryCompressStringObject(pcmd->argv[val_idx]);
-                        if (compressed) {
-                            pcmd->compressed_value = compressed;
+                /* IO thread compression: try to compress SET command values
+                 * for ALL ready pending commands, not just the current one.
+                 * After the break, the main thread will execute these commands
+                 * and won't re-enter the IO thread compression path. */
+                for (pendingCommand *pcmd = c->pending_cmds.head; pcmd != NULL; pcmd = pcmd->next) {
+                    if (pcmd->cmd && pcmd->argc >= 3 &&
+                        (pcmd->cmd->proc == setCommand ||
+                         pcmd->cmd->proc == setnxCommand ||
+                         pcmd->cmd->proc == setexCommand ||
+                         pcmd->cmd->proc == psetexCommand))
+                    {
+                        int val_idx = (pcmd->cmd->proc == setexCommand ||
+                                       pcmd->cmd->proc == psetexCommand) ? 3 : 2;
+                        if (val_idx < pcmd->argc) {
+                            robj *compressed = tryCompressStringObject(pcmd->argv[val_idx]);
+                            if (compressed) {
+                                pcmd->compressed_value = compressed;
+                            }
                         }
                     }
                 }
