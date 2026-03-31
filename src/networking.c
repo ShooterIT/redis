@@ -3640,7 +3640,8 @@ int processInputBuffer(client *c) {
          * deferred until the client is processed by the main thread. Skip prefetch
          * if there are too few commands to avoid meaningless prefetching. */
         if (parse_more && c->running_tid == IOTHREAD_MAIN_THREAD_ID &&
-            c->pending_cmds.ready_len > 1)
+            (c->pending_cmds.ready_len > 1 || (c->lookedcmd &&
+                (c->lookedcmd->proc == mgetCommand || c->lookedcmd->proc == msetCommand))))
         {
             /* Prefetch the commands. */
             resetCommandsBatch();
