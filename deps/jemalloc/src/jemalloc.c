@@ -4533,6 +4533,74 @@ realloc_with_usize(void *ptr, size_t size, size_t *old_usize, size_t *new_usize)
 	return je_realloc_internal(ptr, size, old_usize, new_usize);
 }
 
+JEMALLOC_EXPORT JEMALLOC_ALLOCATOR JEMALLOC_RESTRICT_RETURN
+void JEMALLOC_NOTHROW *
+JEMALLOC_ATTR(malloc) JEMALLOC_ALLOC_SIZE(1)
+mallocx_with_usize(size_t size, int flags, size_t *usize) {
+	void *ret;
+	static_opts_t sopts;
+	dynamic_opts_t dopts;
+
+	LOG("core.mallocx_with_usize.entry", "size: %zu, flags: %d", size, flags);
+
+	static_opts_init(&sopts);
+	dynamic_opts_init(&dopts);
+
+	sopts.assert_nonempty_alloc = true;
+	sopts.null_out_result_on_error = true;
+	sopts.oom_string = "<jemalloc>: Error in mallocx(): out of memory\n";
+
+	dopts.result = &ret;
+	dopts.num_items = 1;
+	dopts.item_size = size;
+	if (flags != 0) {
+		dopts.alignment = MALLOCX_ALIGN_GET(flags);
+		dopts.zero = MALLOCX_ZERO_GET(flags);
+		dopts.tcache_ind = mallocx_tcache_get(flags);
+		dopts.arena_ind = mallocx_arena_get(flags);
+	}
+
+	imalloc(&sopts, &dopts);
+	if (sopts.slow) {
+		uintptr_t args[3] = {size, flags};
+		hook_invoke_alloc(hook_alloc_mallocx, ret, (uintptr_t)ret,
+		    args);
+	}
+
+	LOG("core.mallocx_with_usize.exit", "result: %p", ret);
+	if (usize) *usize = dopts.usize;
+	return ret;
+}
+
+JEMALLOC_EXPORT void JEMALLOC_NOTHROW
+dallocx_with_usize(void *ptr, int flags, size_t *usize) {
+	LOG("core.dallocx_with_usize.entry", "ptr: %p, flags: %d", ptr, flags);
+
+	assert(ptr != NULL);
+	assert(malloc_initialized() || IS_INITIALIZER);
+
+	tsd_t *tsd = tsd_fetch_min();
+	bool fast = tsd_fast(tsd);
+	check_entry_exit_locking(tsd_tsdn(tsd));
+
+	unsigned tcache_ind = mallocx_tcache_get(flags);
+	tcache_t *tcache = tcache_get_from_ind(tsd, tcache_ind, !fast,
+	    /* is_alloc */ false);
+
+	UTRACE(ptr, 0, 0);
+	if (likely(fast)) {
+		tsd_assert_fast(tsd);
+		ifree(tsd, ptr, tcache, false, usize);
+	} else {
+		uintptr_t args_raw[3] = {(uintptr_t)ptr, flags};
+		hook_invoke_dalloc(hook_dalloc_dallocx, ptr, args_raw);
+		ifree(tsd, ptr, tcache, true, usize);
+	}
+	check_entry_exit_locking(tsd_tsdn(tsd));
+
+	LOG("core.dallocx_with_usize.exit", "");
+}
+
 JEMALLOC_EXPORT void JEMALLOC_NOTHROW
 free_with_usize(void *ptr, size_t *usize) {
 	je_free_internal(ptr, usize);

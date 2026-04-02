@@ -7568,6 +7568,56 @@ void kvArenaPurge(int arena_idx) {
     je_mallctl(buf, NULL, NULL, NULL, 0);
 }
 
+/* ---- Async arena free queue (SPSC ring buffer) for child process ---- */
+
+void kvArenaFreeQueueInit(ArenaFreeQueue *q, kvstore *keys, int num_slots) {
+    memset(q, 0, sizeof(*q));
+    q->keys = keys;
+    q->num_slots = num_slots;
+}
+
+void kvArenaFreeQueuePush(ArenaFreeQueue *q, int arena_idx) {
+    int tail;
+    atomicGet(q->tail, tail);
+    q->tasks[tail] = arena_idx;
+    atomicSetWithSync(q->tail, (tail + 1) % (KV_ARENA_COUNT + 1));
+}
+
+void kvArenaFreeQueueStop(ArenaFreeQueue *q) {
+    atomicSetWithSync(q->stop, 1);
+}
+
+void *kvArenaFreeWorker(void *arg) {
+    ArenaFreeQueue *q = arg;
+
+    while (1) {
+        int head, tail, stop;
+        atomicGet(q->head, head);
+        atomicGetWithSync(q->tail, tail);
+
+        if (head == tail) {
+            /* Queue empty – check if we should exit. */
+            atomicGetWithSync(q->stop, stop);
+            if (stop) break;
+            usleep(100);
+            continue;
+        }
+
+        int arena_idx = q->tasks[head];
+        atomicSetWithSync(q->head, (head + 1) % (KV_ARENA_COUNT + 1));
+
+        /* Switch this thread's TLS so dallocx routes to the correct arena. */
+        kvArenaSwitchToSlot(arena_idx);
+        for (int slot = arena_idx; slot < q->num_slots; slot += KV_ARENA_COUNT) {
+            dict *d = kvstoreGetDict(q->keys, slot);
+            if (d) dictEmpty(d, NULL);
+        }
+        kvArenaRestore();
+        kvArenaPurge(arena_idx);
+    }
+    return NULL;
+}
+
 #endif /* USE_JEMALLOC */
 
 void memtest(size_t megabytes, int passes);

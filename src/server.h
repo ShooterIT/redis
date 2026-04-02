@@ -4507,6 +4507,23 @@ void kvArenaInit(void);
 void kvArenaSwitchToSlot(int slot);
 void kvArenaRestore(void);
 void kvArenaPurge(int arena_idx);
+
+/* SPSC (Single-Producer Single-Consumer) ring buffer for async arena free.
+ * The RDB child main thread pushes completed arena indices; a background
+ * worker thread pops them and performs dictEmpty + kvArenaPurge. */
+typedef struct {
+    int tasks[KV_ARENA_COUNT + 1]; /* Ring buffer slots */
+    redisAtomic int head;          /* Consumer (worker) read index */
+    redisAtomic int tail;          /* Producer (main) write index */
+    redisAtomic int stop;          /* Set to 1 by producer to signal exit */
+    kvstore *keys;                 /* The DB keyspace to free from */
+    int num_slots;                 /* Total number of hash slots */
+} ArenaFreeQueue;
+
+void kvArenaFreeQueueInit(ArenaFreeQueue *q, kvstore *keys, int num_slots);
+void kvArenaFreeQueuePush(ArenaFreeQueue *q, int arena_idx);
+void kvArenaFreeQueueStop(ArenaFreeQueue *q);
+void *kvArenaFreeWorker(void *arg);
 #endif
 
 #define STRINGIFY_(x) #x

@@ -1648,6 +1648,17 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter, unsigned 
      * This releases physical pages incrementally, reducing COW overhead. */
     if (server.in_fork_child) {
         int num_slots = kvstoreNumDicts(db->keys);
+
+        /* Start a background worker thread to asynchronously free dicts
+         * and purge arenas while the main thread continues serializing. */
+        ArenaFreeQueue afq;
+        pthread_t free_worker;
+        kvArenaFreeQueueInit(&afq, db->keys, num_slots);
+        if (pthread_create(&free_worker, NULL, kvArenaFreeWorker, &afq) != 0) {
+            serverLog(LL_WARNING, "Failed to create arena free worker thread");
+            return -1;
+        }
+
         for (int arena_idx = 0; arena_idx < KV_ARENA_COUNT; arena_idx++) {
             for (int slot = arena_idx; slot < num_slots; slot += KV_ARENA_COUNT) {
                 if (kvstoreDictSize(db->keys, slot) == 0) continue;
@@ -1697,19 +1708,14 @@ ssize_t rdbSaveDb(rio *rdb, int dbid, int rdbflags, long *key_counter, unsigned 
                 }
                 kvstoreResetDictIterator(&kvs_di);
             }
-            /* All slots for this arena are dumped. Now batch-free all keys
-             * to mark arena pages as dirty, then purge to release them.
-             * Switch to the KV arena+tcache first so that dallocx routes
-             * freed objects into the correct tcache, allowing purge to
-             * reclaim the physical pages effectively. */
-            kvArenaSwitchToSlot(arena_idx);
-            for (int slot = arena_idx; slot < num_slots; slot += KV_ARENA_COUNT) {
-                dict *d = kvstoreGetDict(db->keys, slot);
-                if (d) dictEmpty(d, NULL);
-            }
-            kvArenaRestore();
-            kvArenaPurge(arena_idx);
+            /* All slots for this arena are serialized. Push the arena
+             * index to the background worker for async dictEmpty + purge. */
+            kvArenaFreeQueuePush(&afq, arena_idx);
         }
+
+        /* Signal the worker to exit and wait for it to finish. */
+        kvArenaFreeQueueStop(&afq);
+        pthread_join(free_worker, NULL);
         return written;
     }
 #endif
