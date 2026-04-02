@@ -4051,15 +4051,6 @@ int rdbLoadRioWithLoadingCtx(rio *rdb, int rdbflags, rdbSaveInfo *rsi, rdbLoadin
             keyMetaSpecCleanup(&keyMeta);
             goto eoferr;
         }
-#if defined(USE_JEMALLOC)
-        /* If no SLOT_INFO marker was seen (non-cluster or legacy RDB),
-         * compute the slot from the key name and switch arena before
-         * loading the value (which is the bulk of memory). */
-        if (current_slot < 0) {
-            int slot = getKeySlot(key);
-            kvArenaSwitchToSlot(slot);
-        }
-#endif
         /* Read value */
         val = rdbLoadObject(type,rdb,key,db->id,&error);
 

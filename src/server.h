@@ -4502,7 +4502,7 @@ int iAmMaster(void);
  * Uses je_mallctl("thread.arena") to switch the thread's default arena,
  * preserving jemalloc's malloc() fast path (tcache). */
 #if defined(USE_JEMALLOC)
-#define KV_ARENA_COUNT 16
+#define KV_ARENA_COUNT 8
 void kvArenaInit(void);
 void kvArenaSwitchToSlot(int slot);
 void kvArenaRestore(void);

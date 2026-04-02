@@ -7610,7 +7610,7 @@ void *kvArenaFreeWorker(void *arg) {
         kvArenaSwitchToSlot(arena_idx);
         for (int slot = arena_idx; slot < q->num_slots; slot += KV_ARENA_COUNT) {
             dict *d = kvstoreGetDict(q->keys, slot);
-            if (d) dictEmpty(d, NULL);
+            if (d) dictRelease(d);
         }
         kvArenaRestore();
         kvArenaPurge(arena_idx);
