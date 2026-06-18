@@ -191,8 +191,8 @@ void unbindClientFromIOThreadEventLoop(client *c) {
     pauseIOThread(c->tid);
     connUnbindEventLoop(c->conn);
     IOThread *t = &IOThreads[c->tid];
-    /* We need to remove the client from the compression_clients list so it
-     * won't be processed in IOThreadCompressionCron anymore */
+    /* Remove the client from the codec list so it won't be processed by
+     * processCodecClients in IOThreadBeforeSleep anymore. */
     if (listSearchKey(t->compression_clients, c) ==
         &c->io_thread_compression_clients_node)
     {
@@ -824,13 +824,20 @@ int processClientsFromMainThread(IOThread *t) {
     return processed;
 }
 
+static void processCodecClients(IOThread *t);
+
 void IOThreadBeforeSleep(struct aeEventLoop *el) {
     IOThread *t = el->privdata[0];
 
-    /* Handle pending data(typical TLS). */
+    /* Handle pending data (typical TLS). */
     connTypeProcessPendingData(el);
 
-    /* If any connection type(typical TLS) still has pending unread data don't sleep at all. */
+    /* Flush stale compressed writes and drain buffered decompressed reads for
+     * codec clients.  This replaces the old IOThreadCompressionCron timer and
+     * the CT_Compression has_pending_data/process_pending_data hooks. */
+    processCodecClients(t);
+
+    /* If any connection type (typical TLS) still has pending unread data don't sleep at all. */
     int dont_sleep = connTypeHasPendingData(el);
 
     /* Process clients from main thread, since the main thread may deliver clients
@@ -887,43 +894,45 @@ void IOThreadClientsCron(IOThread *t) {
     }
 }
 
-void IOThreadCompressionCron(IOThread *t) {
+/* Flush pending compressed writes and drain pending decompressed reads for
+ * every codec client on this IO thread.  Called from IOThreadBeforeSleep so
+ * that:
+ *   - Replica clients (COMPRESS): any ZSTD frame that has not been flushed yet
+ *     because compression_max_latency has elapsed gets pushed to the socket.
+ *   - Master clients (DECOMPRESS): bytes that the decompressor already produced
+ *     but that did not fit into the querybuf on the last connRead are delivered
+ *     without issuing a new read(2) call. */
+static void processCodecClients(IOThread *t) {
     if (listLength(t->compression_clients) == 0) return;
 
     listIter li;
     listNode *ln;
     listRewind(t->compression_clients, &li);
-    /* TODO: if compression is generalized for all types of clients this cron
-     * will need to only process a portion of the clients (similar to
-     * IOThreadClientsCron) for performance reasons. I.e in such case the
-     * clientHasPendingCompressionFlush check may be moved directly to
-     * IOThreadClientsCron. */
     while ((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
-
         if (c->io_flags & CLIENT_IO_CLOSE_ASAP) continue;
         serverAssert(c->compression_state);
 
-        /* Usually compressAndWrite will be called at the end of
-         * consumeAndTryWriteCompressed but when compression maximum latency ms
-         * have passed we want to force flush to the compression buffer so we
-         * don't have much delays between writes to the socket */
-        if (clientHasPendingCompressionFlush(c)) {
-            /* Only master/replica clients support client compression for now. */
-            serverAssert(c->flags & CLIENT_SLAVE);
-
-            int written = 0;
-            int err = compressAndWrite(c, &written);
-            if (err) {
-                if (connGetState(c->conn) != CONN_STATE_CONNECTED)
-                    freeClientAsync(c);
-                continue;
+        if (c->flags & CLIENT_SLAVE) {
+            /* Replica client (COMPRESS direction):
+             * flush any ZSTD frame stalled past compression_max_latency. */
+            if (clientHasPendingCompressionFlush(c)) {
+                int written = 0;
+                int err = compressAndWrite(c, &written);
+                if (err) {
+                    if (connGetState(c->conn) != CONN_STATE_CONNECTED)
+                        freeClientAsync(c);
+                    continue;
+                }
+                if (written > 0) {
+                    c->net_output_bytes += written;
+                    atomicIncr(server.stat_net_repl_output_bytes, written);
+                }
             }
-
-            if (written > 0) {
-                c->net_output_bytes += written;
-                atomicIncr(server.stat_net_repl_output_bytes, written);
-            }
+        } else if (c->flags & CLIENT_MASTER) {
+            /* Master client (DECOMPRESS direction):
+             * drain bytes the decompressor buffered but could not deliver. */
+            clientCodecDrainPending(c);
         }
     }
 }
@@ -935,8 +944,6 @@ int IOThreadCron(struct aeEventLoop *eventLoop, long long id, void *clientData) 
     UNUSED(eventLoop);
     UNUSED(id);
     IOThread *t = clientData;
-
-    run_with_period_io(t, server.compression_max_latency) IOThreadCompressionCron(t);
 
     /* Run cron tasks for the clients in the IO thread. */
     IOThreadClientsCron(t);

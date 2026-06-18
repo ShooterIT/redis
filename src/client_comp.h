@@ -27,11 +27,20 @@ int clientCreateCompressionState(struct client *c, compressionDirection dir);
 void clientDestroyCompressionState(struct client *c);
 
 int clientEnableCompression(struct client *c, compressionDirection dir);
-
 void clientDisableCompression(struct client *c);
 
-int compressAndWrite(struct client *c, int *tot_written);
+/* Codec I/O helpers used by the replication write and read choke-points.
+ * Return value: logical (uncompressed/decompressed) bytes consumed/produced.
+ * *sock: physical bytes pushed to / pulled from the socket. */
+ssize_t clientCodecWrite(struct client *c, const void *data, size_t len, size_t *sock);
+ssize_t clientCodecRead(struct client *c, void *buf, size_t len, size_t *sock);
 
+/* Re-drain bytes still buffered inside the decompressor without a socket read.
+ * Called from IOThreadBeforeSleep for master-clients with leftover codec data. */
+void clientCodecDrainPending(struct client *c);
+
+/* Lower-level helpers (used by IOThreadBeforeSleep flush and replication.c). */
+int compressAndWrite(struct client *c, int *tot_written);
 int readFromBufAndDecompress(struct client *c, char *input_buf, size_t input_len,
                              char *output_buf, size_t output_len,
                              size_t *consumed);
