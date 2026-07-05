@@ -10,6 +10,12 @@
 
 #include "server.h"
 
+#define IO_DEFAULT_HZ CONFIG_DEFAULT_HZ
+
+/* Replicates the behaviour of run_with_period used in serverCron but for
+ * IO threads. IO threads use default Hz for now. */
+#define run_with_period_io(_t_, _ms_) _run_with_period((_t_)->cronloops, (_ms_), IO_DEFAULT_HZ)
+
 /* IO threads. */
 IOThread IOThreads[IO_THREADS_MAX_NUM];
 
@@ -124,6 +130,13 @@ void enqueuePendingClientsToMainThread(client *c, int unbind) {
         listUnlinkNode(t->clients, c->io_thread_client_list_node);
         listLinkNodeTail(t->pending_clients_to_main_thread, c->io_thread_client_list_node);
         c->io_thread_client_list_node = NULL;
+
+        if (listSearchKey(t->compression_clients, c) ==
+            &c->io_thread_compression_clients_node)
+        {
+            listUnlinkNode(t->compression_clients,
+                           &c->io_thread_compression_clients_node);
+        }
     }
 }
 
@@ -149,6 +162,17 @@ void enqueuePendingClienstToIOThreads(client *c) {
         c->io_lastinteraction = c->lastinteraction;
     }
 
+    /* Check here prevents data races with IO thread which may also check
+     * this flag. */
+    if (!(c->io_flags & CLIENT_IO_COMPRESSION_ENABLED)) {
+        if (c->compression_level > 0) {
+            clientEnableCompression(c, COMPRESS);
+        }
+        if (c->flags & CLIENT_MASTER && server.repl_master_compression_level > 0) {
+            clientEnableCompression(c, DECOMPRESS);
+        }
+    }
+
     c->running_tid = c->tid;
     listAddNodeHead(mainThreadPendingClientsToIOThreads[c->tid], c);
 }
@@ -158,10 +182,24 @@ void enqueuePendingClienstToIOThreads(client *c) {
 void unbindClientFromIOThreadEventLoop(client *c) {
     serverAssert(c->tid != IOTHREAD_MAIN_THREAD_ID &&
                  c->running_tid == IOTHREAD_MAIN_THREAD_ID);
-    if (!connHasEventLoop(c->conn)) return;
+    /* If the client is not bound to an event loop there is nothing to do,
+     * unless the client uses repl compression in which case we need to unlink
+     * it from IO Thread compression_clients list. */
+    if (!connHasEventLoop(c->conn) && !c->compression_state) return;
+
     /* As calling in main thread, we should pause the io thread to make it safe. */
     pauseIOThread(c->tid);
     connUnbindEventLoop(c->conn);
+    IOThread *t = &IOThreads[c->tid];
+    /* Remove the client from the codec list so it won't be processed by
+     * processCodecClients in IOThreadBeforeSleep anymore. */
+    if (listSearchKey(t->compression_clients, c) ==
+        &c->io_thread_compression_clients_node)
+    {
+        listUnlinkNode(t->compression_clients,
+                       &c->io_thread_compression_clients_node);
+        clientDisableCompression(c);
+    }
     resumeIOThread(c->tid);
 }
 
@@ -304,7 +342,7 @@ void assignClientToIOThread(client *c) {
      * write, and then put it in the list, main thread will send these clients
      * to IO thread in beforeSleep. */
     connUnbindEventLoop(c->conn);
-    c->io_flags &= ~(CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED);
+    c->io_flags &= ~(CLIENT_IO_READ_ENABLED | CLIENT_IO_WRITE_ENABLED | CLIENT_IO_COMPRESSION_ENABLED);
 
     enqueuePendingClienstToIOThreads(c);
 }
@@ -765,6 +803,14 @@ int processClientsFromMainThread(IOThread *t) {
             connSetReadHandler(c->conn, readQueryFromClient);
         }
 
+        /* Add the client to the compression clients list. */
+        if (c->compression_state != NULL &&
+            listSearchKey(t->compression_clients, c) == NULL)
+        {
+            listLinkNodeTail(t->compression_clients,
+                             &c->io_thread_compression_clients_node);
+        }
+
         /* If the client has pending replies, write replies to client. */
         if (clientHasPendingReplies(c)) {
             writeToClient(c, 0);
@@ -778,13 +824,20 @@ int processClientsFromMainThread(IOThread *t) {
     return processed;
 }
 
+static void processCodecClients(IOThread *t);
+
 void IOThreadBeforeSleep(struct aeEventLoop *el) {
     IOThread *t = el->privdata[0];
 
-    /* Handle pending data(typical TLS). */
+    /* Handle pending data (typical TLS). */
     connTypeProcessPendingData(el);
 
-    /* If any connection type(typical TLS) still has pending unread data don't sleep at all. */
+    /* Flush stale compressed writes and drain buffered decompressed reads for
+     * codec clients.  This replaces the old IOThreadCompressionCron timer and
+     * the CT_Compression has_pending_data/process_pending_data hooks. */
+    processCodecClients(t);
+
+    /* If any connection type (typical TLS) still has pending unread data don't sleep at all. */
     int dont_sleep = connTypeHasPendingData(el);
 
     /* Process clients from main thread, since the main thread may deliver clients
@@ -825,7 +878,7 @@ void IOThreadClientsCron(IOThread *t) {
     /* Process at least a few clients while we are at it, even if we need
      * to process less than CLIENTS_CRON_MIN_ITERATIONS to meet our contract
      * of processing each client once per second. */
-    int iterations = listLength(t->clients) / CONFIG_DEFAULT_HZ;
+    int iterations = listLength(t->clients) / IO_DEFAULT_HZ;
     if (iterations < CLIENTS_CRON_MIN_ITERATIONS) {
         iterations = CLIENTS_CRON_MIN_ITERATIONS;
     }
@@ -841,7 +894,50 @@ void IOThreadClientsCron(IOThread *t) {
     }
 }
 
-/* This is the IO thread timer interrupt, CONFIG_DEFAULT_HZ times per second.
+/* Flush pending compressed writes and drain pending decompressed reads for
+ * every codec client on this IO thread.  Called from IOThreadBeforeSleep so
+ * that:
+ *   - Replica clients (COMPRESS): any ZSTD frame that has not been flushed yet
+ *     because compression_max_latency has elapsed gets pushed to the socket.
+ *   - Master clients (DECOMPRESS): bytes that the decompressor already produced
+ *     but that did not fit into the querybuf on the last connRead are delivered
+ *     without issuing a new read(2) call. */
+static void processCodecClients(IOThread *t) {
+    if (listLength(t->compression_clients) == 0) return;
+
+    listIter li;
+    listNode *ln;
+    listRewind(t->compression_clients, &li);
+    while ((ln = listNext(&li))) {
+        client *c = listNodeValue(ln);
+        if (c->io_flags & CLIENT_IO_CLOSE_ASAP) continue;
+        serverAssert(c->compression_state);
+
+        if (c->flags & CLIENT_SLAVE) {
+            /* Replica client (COMPRESS direction):
+             * flush any ZSTD frame stalled past compression_max_latency. */
+            if (clientHasPendingCompressionFlush(c)) {
+                int written = 0;
+                int err = compressAndWrite(c, &written);
+                if (err) {
+                    if (connGetState(c->conn) != CONN_STATE_CONNECTED)
+                        freeClientAsync(c);
+                    continue;
+                }
+                if (written > 0) {
+                    c->net_output_bytes += written;
+                    atomicIncr(server.stat_net_repl_output_bytes, written);
+                }
+            }
+        } else if (c->flags & CLIENT_MASTER) {
+            /* Master client (DECOMPRESS direction):
+             * drain bytes the decompressor buffered but could not deliver. */
+            clientCodecDrainPending(c);
+        }
+    }
+}
+
+/* This is the IO thread timer interrupt, IO_DEFAULT_HZ times per second.
  * The current responsibility is to detect clients that have been stuck in the
  * IO thread for too long and hand them over to the main thread for handling. */
 int IOThreadCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
@@ -852,7 +948,9 @@ int IOThreadCron(struct aeEventLoop *eventLoop, long long id, void *clientData) 
     /* Run cron tasks for the clients in the IO thread. */
     IOThreadClientsCron(t);
 
-    return 1000/CONFIG_DEFAULT_HZ;
+    t->cronloops++;
+
+    return 1000/IO_DEFAULT_HZ;
 }
 
 /* The main function of IO thread, it will run an event loop. The mian thread
@@ -894,6 +992,8 @@ void initThreadedIO(void) {
         t->processing_clients = listCreate();
         t->pending_clients_to_main_thread = listCreate();
         t->clients = listCreate();
+        t->compression_clients = listCreate();
+        t->cronloops = 0;
         atomicSetWithSync(t->paused, IO_THREAD_UNPAUSED);
         atomicSetWithSync(t->running, 0);
 
