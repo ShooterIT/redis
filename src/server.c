@@ -3188,6 +3188,9 @@ void initServer(void) {
         server.maxmemory_policy = MAXMEMORY_NO_EVICTION;
     }
 
+#if defined(USE_JEMALLOC)
+    kvArenaInit();
+#endif
     luaEnvInit();
     scriptingInit(1);
     if (functionsInit() == C_ERR) {
@@ -4014,7 +4017,21 @@ void call(client *c, int flags) {
      * re-processing and unblock the client.*/
     c->flags |= CLIENT_EXECUTING_COMMAND;
 
+#if defined(USE_JEMALLOC)
+    /* Switch to the KV arena+tcache for this slot so that all allocations
+     * during command execution land in the correct arena. */
+    int old_arena_flags = zmalloc_arena_flags;
+    if (c->slot >= 0) {
+        kvArenaSwitchToSlot(c->slot);
+    }
+#endif
+
     c->cmd->proc(c);
+
+#if defined(USE_JEMALLOC)
+    /* Restore previous arena flags (usually 0 = default malloc path). */
+    zmalloc_arena_flags = old_arena_flags;
+#endif
 
     exitExecutionUnit();
 
@@ -7644,6 +7661,118 @@ void dismissMemoryInChild(void) {
     }
 #endif
 }
+
+/***************************************/
+/*** Arena-based KV memory isolation ***/
+/***************************************/
+
+#if defined(USE_JEMALLOC)
+
+static unsigned kv_arenas[KV_ARENA_COUNT];
+static unsigned kv_tcaches[KV_ARENA_COUNT];
+/* Pre-computed mallocx flags: MALLOCX_ARENA(a) | MALLOCX_TCACHE(t) */
+static int kv_arena_flags[KV_ARENA_COUNT];
+
+/* Create 16 kv_arenas + 16 independent tcaches for slot data isolation.
+ * Each arena gets its own tcache so cached objects never leak across arenas. */
+void kvArenaInit(void) {
+    for (int i = 0; i < KV_ARENA_COUNT; i++) {
+        unsigned arena;
+        size_t sz = sizeof(unsigned);
+        int err = je_mallctl("arenas.create", (void *)&arena, &sz, NULL, 0);
+        if (err) {
+            serverLog(LL_WARNING, "Failed creating KV jemalloc arena %d (err=%d).", i, err);
+            exit(1);
+        }
+        kv_arenas[i] = arena;
+
+        unsigned tcache;
+        sz = sizeof(unsigned);
+        err = je_mallctl("tcache.create", (void *)&tcache, &sz, NULL, 0);
+        if (err) {
+            serverLog(LL_WARNING, "Failed creating KV jemalloc tcache %d (err=%d).", i, err);
+            exit(1);
+        }
+        kv_tcaches[i] = tcache;
+        kv_arena_flags[i] = MALLOCX_ARENA(arena) | MALLOCX_TCACHE(tcache);
+    }
+
+    serverLog(LL_NOTICE, "KV arena isolation enabled: arenas[0..15]=%u..%u, tcaches[0..15]=%u..%u",
+              kv_arenas[0], kv_arenas[KV_ARENA_COUNT - 1],
+              kv_tcaches[0], kv_tcaches[KV_ARENA_COUNT - 1]);
+}
+
+/* Switch to the KV arena+tcache for this slot.
+ * Sets the thread-local zmalloc_arena_flags so that zmalloc/zcalloc/zrealloc
+ * route through mallocx with the correct arena and tcache. */
+void kvArenaSwitchToSlot(int slot) {
+    zmalloc_arena_flags = kv_arena_flags[slot % KV_ARENA_COUNT];
+}
+
+/* Restore to default allocation path (standard malloc, no arena routing). */
+void kvArenaRestore(void) {
+    zmalloc_arena_flags = 0;
+}
+
+/* Purge (madvise MADV_DONTNEED) freed pages in the given KV arena.
+ * arena_idx is 0..KV_ARENA_COUNT-1. */
+void kvArenaPurge(int arena_idx) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "arena.%u.purge", kv_arenas[arena_idx]);
+    je_mallctl(buf, NULL, NULL, NULL, 0);
+}
+
+/* ---- Async arena free queue (SPSC ring buffer) for child process ---- */
+
+void kvArenaFreeQueueInit(ArenaFreeQueue *q, kvstore *keys, int num_slots) {
+    memset(q, 0, sizeof(*q));
+    q->keys = keys;
+    q->num_slots = num_slots;
+}
+
+void kvArenaFreeQueuePush(ArenaFreeQueue *q, int arena_idx) {
+    int tail;
+    atomicGet(q->tail, tail);
+    q->tasks[tail] = arena_idx;
+    atomicSetWithSync(q->tail, (tail + 1) % (KV_ARENA_COUNT + 1));
+}
+
+void kvArenaFreeQueueStop(ArenaFreeQueue *q) {
+    atomicSetWithSync(q->stop, 1);
+}
+
+void *kvArenaFreeWorker(void *arg) {
+    ArenaFreeQueue *q = arg;
+
+    while (1) {
+        int head, tail, stop;
+        atomicGet(q->head, head);
+        atomicGetWithSync(q->tail, tail);
+
+        if (head == tail) {
+            /* Queue empty – check if we should exit. */
+            atomicGetWithSync(q->stop, stop);
+            if (stop) break;
+            usleep(100);
+            continue;
+        }
+
+        int arena_idx = q->tasks[head];
+        atomicSetWithSync(q->head, (head + 1) % (KV_ARENA_COUNT + 1));
+
+        /* Switch this thread's TLS so dallocx routes to the correct arena. */
+        kvArenaSwitchToSlot(arena_idx);
+        for (int slot = arena_idx; slot < q->num_slots; slot += KV_ARENA_COUNT) {
+            dict *d = kvstoreGetDict(q->keys, slot);
+            if (d) dictRelease(d);
+        }
+        kvArenaRestore();
+        kvArenaPurge(arena_idx);
+    }
+    return NULL;
+}
+
+#endif /* USE_JEMALLOC */
 
 void memtest(size_t megabytes, int passes);
 

@@ -75,10 +75,14 @@ void *je_malloc_with_usize(size_t size, size_t *usize);
 void *je_calloc_with_usize(size_t num, size_t size, size_t *usize);
 void *je_realloc_with_usize(void *ptr, size_t size, size_t *old_usize, size_t *new_usize);
 void je_free_with_usize(void *ptr, size_t *usize);
+void *je_mallocx_with_usize(size_t size, int flags, size_t *usize);
+void je_dallocx_with_usize(void *ptr, int flags, size_t *usize);
 #define malloc_with_usize(size,usize) je_malloc_with_usize(size,usize)
 #define calloc_with_usize(num,size,usize) je_calloc_with_usize(num,size,usize)
 #define realloc_with_usize(ptr,size,old_usize,new_usize) je_realloc_with_usize(ptr,size,old_usize,new_usize)
 #define free_with_usize(ptr,usize) je_free_with_usize(ptr,usize)
+#define mallocx_with_usize(size,flags,usize) je_mallocx_with_usize(size,flags,usize)
+#define dallocx_with_usize(ptr,flags,usize) je_dallocx_with_usize(ptr,flags,usize)
 #endif
 
 /* Compile-time jemalloc tuning: raise per-bin tcache limits for small size
@@ -234,6 +238,10 @@ static void zmalloc_default_oom(size_t size) {
 
 static void (*zmalloc_oom_handler)(size_t) = zmalloc_default_oom;
 
+#if defined(USE_JEMALLOC)
+__thread int zmalloc_arena_flags = 0;
+#endif
+
 #ifdef HAVE_MALLOC_SIZE
 void *extend_to_usable(void *ptr, size_t size) {
     UNUSED(size);
@@ -247,7 +255,9 @@ static inline void *ztrymalloc_usable_internal(size_t size, size_t *usable) {
     /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
     if (size >= SIZE_MAX/2) return NULL;
 #ifdef HAVE_ALLOC_WITH_USIZE
-    void *ptr = malloc_with_usize(MALLOC_MIN_SIZE(size)+PREFIX_SIZE, &size);
+    void *ptr = zmalloc_arena_flags ?
+        mallocx_with_usize(MALLOC_MIN_SIZE(size)+PREFIX_SIZE, zmalloc_arena_flags, &size) :
+        malloc_with_usize(MALLOC_MIN_SIZE(size)+PREFIX_SIZE, &size);
 #else
     void *ptr = malloc(MALLOC_MIN_SIZE(size)+PREFIX_SIZE);
 #endif
@@ -378,7 +388,9 @@ static inline void *ztrycalloc_usable_internal(size_t size, size_t *usable) {
     /* Possible overflow, return NULL, so that the caller can panic or handle a failed allocation. */
     if (size >= SIZE_MAX/2) return NULL;
 #ifdef HAVE_ALLOC_WITH_USIZE
-    void *ptr = calloc_with_usize(1, MALLOC_MIN_SIZE(size)+PREFIX_SIZE, &size);
+    void *ptr = zmalloc_arena_flags ?
+        mallocx_with_usize(MALLOC_MIN_SIZE(size)+PREFIX_SIZE, zmalloc_arena_flags | MALLOCX_ZERO, &size) :
+        calloc_with_usize(1, MALLOC_MIN_SIZE(size)+PREFIX_SIZE, &size);
 #else
     void *ptr = calloc(1, MALLOC_MIN_SIZE(size)+PREFIX_SIZE);
 #endif
@@ -485,6 +497,23 @@ static inline void *ztryrealloc_usable_internal(void *ptr, size_t size, size_t *
         *old_usable = oldsize;
         return NULL;
     }
+#if defined(USE_JEMALLOC)
+    if (zmalloc_arena_flags) {
+        oldsize = zmalloc_size(ptr);
+        newptr = rallocx(ptr, size, zmalloc_arena_flags);
+        if (newptr == NULL) {
+            *usable = 0;
+            *old_usable = oldsize;
+            return NULL;
+        }
+        update_zmalloc_stat_free(oldsize);
+        size = zmalloc_size(newptr);
+        update_zmalloc_stat_alloc(size);
+        *usable = size;
+        *old_usable = oldsize;
+        return newptr;
+    }
+#endif
 #ifdef HAVE_ALLOC_WITH_USIZE
     newptr = realloc_with_usize(ptr, size, &oldsize, &size);
     if (newptr == NULL) {
@@ -587,7 +616,11 @@ void zfree(void *ptr) {
 
 #ifdef HAVE_ALLOC_WITH_USIZE
     size_t oldsize;
-    free_with_usize(ptr, &oldsize);
+    if (zmalloc_arena_flags) {
+        dallocx_with_usize(ptr, zmalloc_arena_flags, &oldsize);
+    } else {
+        free_with_usize(ptr, &oldsize);
+    }
     update_zmalloc_stat_free(oldsize);
 #elif HAVE_MALLOC_SIZE
     update_zmalloc_stat_free(zmalloc_size(ptr));
@@ -614,7 +647,11 @@ void zfree_usable(void *ptr, size_t *usable) {
     }
 
 #ifdef HAVE_ALLOC_WITH_USIZE
-    free_with_usize(ptr, &oldsize);
+    if (zmalloc_arena_flags) {
+        dallocx_with_usize(ptr, zmalloc_arena_flags, &oldsize);
+    } else {
+        free_with_usize(ptr, &oldsize);
+    }
     update_zmalloc_stat_free(oldsize);
 #elif HAVE_MALLOC_SIZE
     update_zmalloc_stat_free(oldsize = zmalloc_size(ptr));
