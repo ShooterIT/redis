@@ -354,6 +354,14 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define AOF_ON 1              /* AOF is on */
 #define AOF_WAIT_REWRITE 2    /* AOF waits rewrite to start appending */
 
+/* Backup states (MP-AOF based backup, see backupCommand in aof.c) */
+#define BACKUP_STATE_IDLE         0 /* No backup in progress */
+#define BACKUP_STATE_PENDING      1 /* Waiting until an AOFRW can start */
+#define BACKUP_STATE_SNAPSHOTTING 2 /* Waiting for the snapshot (BASE) rewrite */
+#define BACKUP_STATE_INCREMENTING 3 /* BASE pinned, accumulating into the live INCR */
+#define BACKUP_STATE_SEALED       4 /* BASE + INCR + manifest frozen in the backup dir */
+#define BACKUP_STATE_FAILED       5 /* The last backup failed or was aborted */
+
 /* AOF return values for loadAppendOnlyFiles() and loadSingleAppendOnlyFile() */
 #define AOF_OK 0
 #define AOF_NOT_EXIST 1
@@ -495,6 +503,12 @@ typedef enum blocking_type {
     BLOCKED_POSTPONE_TRIM, /* Master client is blocked due to an active trim job. */
     BLOCKED_SHUTDOWN, /* SHUTDOWN. */
     BLOCKED_LAZYFREE, /* LAZYFREE */
+    BLOCKED_LIST_NONEMPTY, /* Blocked waiting for an already-existing list to
+                            * grow enough (BLMOVEM EXACTLY). Woken by list
+                            * creation (like BLOCKED_LIST) and by writes that
+                            * grow a pre-existing list, but NOT limited to key
+                            * availability. Unlike BLOCKED_LIST, module clients
+                            * are not woken by the "list grew" signal. */
     BLOCKED_NUM,      /* Number of blocked states. */
     BLOCKED_END       /* End of enumeration */
 } blocking_type;
@@ -1323,6 +1337,12 @@ typedef struct blockingState {
 typedef struct readyList {
     redisDb *db;
     robj *key;
+    int wake_modules;           /* Whether module-blocked clients on this key
+                                 * should be served. Set to 0 by signals coming
+                                 * from BLOCKED_LIST_NONEMPTY (plain writes to a
+                                 * pre-existing list), so module clients keep
+                                 * being woken only by RM_SignalKeyAsReady or
+                                 * key (re)creation. */
 } readyList;
 
 /* List of pending commands. */
@@ -1735,7 +1755,8 @@ struct sharedObjectsStruct {
     *masterdownerr, *roslaveerr, *execaborterr, *noautherr, *noreplicaserr,
     *busykeyerr, *oomerr, *plus, *messagebulk, *pmessagebulk, *subscribebulk,
     *unsubscribebulk, *psubscribebulk, *punsubscribebulk, *del, *unlink,
-    *rpop, *lpop, *lpush, *rpoplpush, *lmove, *blmove, *zpopmin, *zpopmax,
+    *rpop, *lpop, *lpush, *rpoplpush, *lmove, *blmove, *lmovem, *exactly,
+    *obo, *bulk, *zpopmin, *zpopmax,
     *emptyscan, *multi, *exec, *left, *right, *hset, *srem, *xgroup, *xclaim, *xack,
     *script, *replconf, *eval, *persist, *set, *pexpireat, *pexpire,
     *hdel, *hpexpireat, *hpersist, *hsetex,
@@ -2054,7 +2075,6 @@ struct redisServer {
     int module_pipe[2];         /* Pipe used to awake the event loop by module threads. */
     pid_t child_pid;            /* PID of current child */
     int child_type;             /* Type of current child */
-    int debug_fork_fail;        /* Make the next redisFork() fail. (used by tests) */
     redisAtomic int module_gil_acquring; /* Indicates whether the GIL is being acquiring by the main thread. */
     /* Networking */
     int port;                   /* TCP listening port */
@@ -2258,6 +2278,7 @@ struct redisServer {
     int supervised;                 /* 1 if supervised, 0 otherwise. */
     int supervised_mode;            /* See SUPERVISED_* */
     int daemonize;                  /* True if running as a daemon */
+    char *preload_file;             /* [aof|rdb]:[filename] to preload on startup */
     int set_proc_title;             /* True if change proc title */
     char *proc_title_template;      /* Process title template format */
     clientBufferLimitsConfig client_obuf_limits[CLIENT_TYPE_OBUF_COUNT];
@@ -2311,6 +2332,18 @@ struct redisServer {
     aofManifest *aof_manifest;       /* Used to track AOFs. */
     int aof_disable_auto_gc;         /* If disable automatically deleting HISTORY type AOFs?
                                         default no. (for testings). */
+
+    /* Backup (MP-AOF based, see backupCommand in aof.c) */
+    int backup_state;                /* BACKUP_STATE_* */
+    char *backup_dirname;            /* Name of the backup directory. */
+    int backup_can_remove_aof_dir;   /* 1 if stopping temp AOF may remove appendonlydir. */
+    sds backup_base_filename;        /* Basename of the BASE file hard-linked into backupdirname. */
+    sds backup_incr_filename;        /* Basename of the INCR file hard-linked into backupdirname. */
+    sds backup_manifest_filename;    /* Basename of the manifest written into backupdirname. */
+    sds backup_error;                /* Last backup failure/abort reason, or NULL. */
+    time_t backup_start_time;        /* Unix time when the current/last backup started. */
+    time_t backup_end_time;          /* Unix time when the current/last backup was sealed. */
+    time_t backup_sealed_ttl;        /* Seconds to keep SEALED backup files; 0 disables auto cleanup. */
 
     /* RDB persistence */
     long long dirty;                /* Changes to DB from the last save */
@@ -2382,6 +2415,7 @@ struct redisServer {
     int repl_ping_slave_period;     /* Master pings the slave every N seconds */
     replBacklog *repl_backlog;      /* Replication backlog for partial syncs */
     long long repl_backlog_size;    /* Backlog circular buffer size */
+    long long repl_last_flush_offset;  /* master_repl_offset at the last replica flush */
     long long repl_full_sync_buffer_limit; /* Accumulated repl data limit during rdb channel replication */
     replDataBuf repl_full_sync_buffer;  /* Accumulated replication data for rdb channel replication */
     time_t repl_backlog_time_limit; /* Time without slaves after the backlog
@@ -3313,6 +3347,7 @@ int getClientType(client *c);
 int getClientTypeByName(char *name);
 char *getClientTypeName(int class);
 void flushSlavesOutputBuffers(void);
+void flushSlavesOutputBuffersIfNeeded(void);
 void disconnectSlaves(void);
 void evictClients(void);
 int listenToPort(connListener *fds);
@@ -3399,7 +3434,9 @@ void trackingLimitUsedSlots(void);
 uint64_t trackingGetTotalItems(void);
 uint64_t trackingGetTotalKeys(void);
 uint64_t trackingGetTotalPrefixes(void);
-void trackingBroadcastInvalidationMessages(void);
+void trackingBroadcastInvalidationMessages(user *u);
+void trackingBroadcastFlushClientPrefixes(client *c);
+void clientSetUser(client *c, user *new_user);
 int checkPrefixCollisionsOrReply(client *c, robj **prefix, size_t numprefix);
 
 /* List data type */
@@ -3534,7 +3571,10 @@ void flushAppendOnlyFile(int force);
 void feedAppendOnlyFile(int dictid, robj **argv, int argc);
 void aofRemoveTempFile(pid_t childpid);
 int rewriteAppendOnlyFileBackground(void);
+int loadPreLoadAOFFile(char *file);
+int loadPreLoadManifestFile(char *file);
 int loadAppendOnlyFiles(aofManifest *am);
+void upgradeAofIfNeeded(aofManifest *am);
 void stopAppendOnly(void);
 int startAppendOnly(void);
 void startAppendOnlyWithRetry(void);
@@ -3543,7 +3583,11 @@ void backgroundRewriteDoneHandler(int exitcode, int bysignal);
 void killAppendOnlyChild(void);
 void aofLoadManifestFromDisk(void);
 void aofOpenIfNeededOnServerStart(void);
+void aofHandlePreloadOnServerStart(void);
 void aofManifestFree(aofManifest *am);
+void backupCron(void);
+int backupIsInProgress(void);
+void backupSetFailed(const char *err);
 int aofDelHistoryFiles(void);
 int aofRewriteLimited(void);
 void updateCurIncrAofEndOffset(void);
@@ -3603,6 +3647,7 @@ unsigned long ACLGetCommandID(sds cmdname);
 void ACLClearCommandID(void);
 user *ACLGetUserByName(const char *name, size_t namelen);
 int ACLUserCheckKeyPerm(user *u, const char *key, int keylen, int flags);
+int ACLUserHasUnrestrictedKeyAccess(user *u, int flags);
 int ACLUserCheckChannelPerm(user *u, sds channel, int literal);
 int ACLCheckAllUserCommandPerm(user *u, struct redisCommand *cmd, robj **argv, int argc, getKeysResult *key_result, int *idxptr);
 int ACLUserCheckCmdWithUnrestrictedKeyAccess(user *u, struct redisCommand *cmd, robj **argv, int argc, int flags);
@@ -4224,6 +4269,7 @@ int getTimeoutFromObjectOrReply(client *c, robj *object, mstime_t *timeout, int 
 void disconnectAllBlockedClients(void);
 void handleClientsBlockedOnKeys(void);
 void signalKeyAsReady(redisDb *db, robj *key, int type);
+void signalKeyAsReadyNonEmptyList(redisDb *db, robj *key);
 void blockForKeys(client *c, int btype, robj **keys, int numkeys, mstime_t timeout, int unblock_on_nokey);
 void blockClientShutdown(client *c);
 void blockPostponeClient(client *c);
@@ -4342,6 +4388,7 @@ void lastsaveCommand(client *c);
 void saveCommand(client *c);
 void bgsaveCommand(client *c);
 void bgrewriteaofCommand(client *c);
+void backupCommand(client *c);
 void shutdownCommand(client *c);
 void slowlogCommand(client *c);
 void moveCommand(client *c);
@@ -4391,6 +4438,7 @@ void lremCommand(client *c);
 void lposCommand(client *c);
 void rpoplpushCommand(client *c);
 void lmoveCommand(client *c);
+void lmovemCommand(client *c);
 void infoCommand(client *c);
 void mgetCommand(client *c);
 void monitorCommand(client *c);
@@ -4442,6 +4490,7 @@ void brpopCommand(client *c);
 void blmpopCommand(client *c);
 void brpoplpushCommand(client *c);
 void blmoveCommand(client *c);
+void blmovemCommand(client *c);
 void appendCommand(client *c);
 void strlenCommand(client *c);
 void zrankCommand(client *c);
@@ -4509,6 +4558,9 @@ void readonlyCommand(client *c);
 void readwriteCommand(client *c);
 void sflushCommand(client *c);
 int verifyDumpPayload(unsigned char *p, size_t len, uint16_t *rdbver_ptr);
+#define DUMP_PAYLOAD_SKIP_CHECKSUM (1<<0)
+#define DUMP_PAYLOAD_SKIP_KEY_META (1<<1)
+void createDumpPayload(rio *payload, robj *o, robj *key, int dbid, int flags);
 void dumpCommand(client *c);
 void clientCommand(client *c);
 void helloCommand(client *c);
