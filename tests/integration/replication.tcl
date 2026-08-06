@@ -1703,6 +1703,32 @@ start_server {tags {"repl external:skip"}} {
     }
 }
 
+start_server {tags {"repl external:skip"} overrides {save {}}} {
+    set replica [srv 0 client]
+    start_server {overrides {save {} repl-diskless-sync yes repl-diskless-sync-delay 0}} {
+        set master [srv 0 client]
+        set master_host [srv 0 host]
+        set master_port [srv 0 port]
+
+        test "Diskless replica loading does not deadlock above maxmemory with lazy flush" {
+            $replica config set repl-diskless-load flushdb
+            $replica config set replica-lazy-flush yes
+            $replica config set loading-process-events-interval-bytes 1024
+            $replica debug populate 100000
+            $replica config set maxmemory 1
+            $replica config set maxmemory-policy noeviction
+
+            populate 10000 master 100
+            $replica replicaof $master_host $master_port
+
+            wait_for_sync $replica
+            wait_for_ofs_sync $master $replica
+            assert_equal [$master debug digest] [$replica debug digest]
+            assert_morethan [s -1 used_memory] 1
+        }
+    }
+}
+
 start_server {tags {"repl external:skip"}} {
     set replica [srv 0 client]
     start_server {} {

@@ -4598,6 +4598,36 @@ void stopSaving(int success) {
                           NULL);
 }
 
+/* Briefly yield CPU to the lazy-free BIO thread while a diskless replica is
+ * loading a new dataset on top of an asynchronously flushed old dataset.
+ *
+ * This is intentionally a bounded delay rather than a wait for memory to fall
+ * below maxmemory. The new dataset may itself be larger than maxmemory, in
+ * which case waiting for that condition would deadlock the full sync. */
+static void rdbLoadApplyBackpressure(rio *r) {
+    if (!server.maxmemory ||
+        server.repl_diskless_load != REPL_DISKLESS_LOAD_ALWAYS ||
+        !server.repl_slave_lazy_flush ||
+        server.repl_state != REPL_STATE_TRANSFER ||
+        rioCheckType(r) != RIO_TYPE_CONN ||
+        bioPendingJobsOfType(BIO_LAZY_FREE) == 0)
+    {
+        return;
+    }
+
+    size_t mem_used = zmalloc_used_memory();
+
+    /* Apply the same exclusions used by maxmemory enforcement. The full-sync
+     * replication buffer is temporary too, but isn't included in
+     * freeMemoryGetNotCountedMemory(). */
+    size_t excluded = freeMemoryGetNotCountedMemory();
+    mem_used = mem_used > excluded ? mem_used - excluded : 0;
+    excluded = server.repl_full_sync_buffer.mem_used;
+    mem_used = mem_used > excluded ? mem_used - excluded : 0;
+
+    if (mem_used > server.maxmemory) usleep(1000);
+}
+
 /* Track loading progress in order to serve client's from time to time
    and if needed calculate rdb checksum  */
 void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
@@ -4611,6 +4641,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
         loadingAbsProgress(r->processed_bytes);
         processEventsWhileBlocked();
         processModuleLoadingProgressEvent(0);
+        rdbLoadApplyBackpressure(r);
     }
     if (server.repl_state == REPL_STATE_TRANSFER && rioCheckType(r) == RIO_TYPE_CONN) {
         atomicIncr(server.stat_net_repl_input_bytes, len);
